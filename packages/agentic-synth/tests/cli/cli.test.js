@@ -18,7 +18,7 @@ describe('CLI', () => {
   let outputPath;
   let configPath;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     testDir = join(tmpdir(), `agentic-synth-test-${Date.now()}`);
     schemaPath = join(testDir, 'schema.json');
     outputPath = join(testDir, 'output.json');
@@ -26,9 +26,8 @@ describe('CLI', () => {
 
     // Create test directory
     if (!existsSync(testDir)) {
-      await import('fs').then(({ mkdirSync }) => {
-        mkdirSync(testDir, { recursive: true });
-      });
+      const { mkdirSync } = await import('fs');
+      mkdirSync(testDir, { recursive: true });
     }
   });
 

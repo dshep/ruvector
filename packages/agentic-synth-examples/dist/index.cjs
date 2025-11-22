@@ -1175,7 +1175,7 @@ var MultiModelBenchmark = class {
         totalScore += score;
         count++;
       } catch (error) {
-        console.error(`    \u26A0 Evaluation error: ${error.message}`);
+        console.error(`    \u26A0 Evaluation error: ${error.message || error}`);
       }
     }
     return count > 0 ? totalScore / count : 0;
@@ -1197,7 +1197,7 @@ var MultiModelBenchmark = class {
         const latency = import_perf_hooks2.performance.now() - start;
         latencies.push(latency);
       } catch (error) {
-        console.error(`    \u26A0 Performance test error: ${error.message}`);
+        console.error(`    \u26A0 Performance test error: ${error.message || error}`);
       }
     }
     latencies.sort((a, b) => a - b);
