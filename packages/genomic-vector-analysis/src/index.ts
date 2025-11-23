@@ -16,6 +16,10 @@ export { VectorDatabase } from './core/VectorDatabase';
 // Embedding exports
 export { KmerEmbedding } from './embeddings/KmerEmbedding';
 
+// Pre-trained Models exports
+export { PreTrainedModels, PreTrainedModel } from './models/PreTrainedModels';
+export type { ModelMetadata, ModelData, ModelRegistryEntry } from './models/PreTrainedModels';
+
 // Learning exports
 export { PatternRecognizer } from './learning/PatternRecognizer';
 
