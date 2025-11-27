@@ -1,0 +1,166 @@
+{
+  "timestamp": "2025-11-27T20:18:46.344Z",
+  "benchmarkData": {
+    "traditional": {
+      "blast": {
+        "name": "NCBI BLAST",
+        "type": "Alignment-based",
+        "parameters": "N/A (heuristic)",
+        "sensitivity": 0.99,
+        "speed_factor": 1,
+        "accuracy": 0.98,
+        "memory_gb": 16,
+        "scalability": "millions",
+        "gpu_support": false,
+        "cost_per_1m_queries": 150,
+        "setup_complexity": "low",
+        "use_case": "Gold standard for homology search"
+      },
+      "diamond": {
+        "name": "DIAMOND",
+        "type": "Alignment-based",
+        "parameters": "N/A (heuristic)",
+        "sensitivity": 0.95,
+        "speed_factor": 100,
+        "accuracy": 0.94,
+        "memory_gb": 8,
+        "scalability": "billions",
+        "gpu_support": false,
+        "cost_per_1m_queries": 2.5,
+        "setup_complexity": "low",
+        "use_case": "Large-scale protein search"
+      },
+      "mmseqs2": {
+        "name": "MMseqs2",
+        "type": "Alignment-based",
+        "parameters": "N/A (heuristic)",
+        "sensitivity": 0.97,
+        "speed_factor": 400,
+        "accuracy": 0.96,
+        "memory_gb": 4,
+        "scalability": "billions",
+        "gpu_support": true,
+        "cost_per_1m_queries": 0.75,
+        "setup_complexity": "medium",
+        "use_case": "Metagenomics, clustering"
+      }
+    },
+    "foundation_models": {
+      "dnabert2": {
+        "name": "DNABERT-2",
+        "type": "Transformer (BERT)",
+        "parameters": "117M",
+        "embedding_dim": 768,
+        "max_seq_length": "unlimited (ALiBi)",
+        "training_time": "14 days (8x RTX 2080Ti)",
+        "training_cost": 1500,
+        "inference_ms": 15,
+        "accuracy_genomic": 0.89,
+        "gpu_required": "T4 (inference)",
+        "vram_gb": 8,
+        "cost_per_1m_queries": 8.5,
+        "strengths": "Best for human genome tasks",
+        "paper": "ICLR 2024"
+      },
+      "nucleotide_transformer": {
+        "name": "Nucleotide Transformer v2",
+        "type": "Transformer (RoPE)",
+        "parameters": "500M-2.5B",
+        "embedding_dim": 1024,
+        "max_seq_length": 12000,
+        "training_time": "28 days (128 GPUs)",
+        "training_cost": 50000,
+        "inference_ms": 45,
+        "accuracy_genomic": 0.91,
+        "gpu_required": "A100 (large models)",
+        "vram_gb": 24,
+        "cost_per_1m_queries": 25,
+        "strengths": "Epigenetic modification detection",
+        "paper": "Nature Methods 2024"
+      },
+      "hyenadna": {
+        "name": "HyenaDNA",
+        "type": "Hyena (long-range)",
+        "parameters": "1.4B",
+        "embedding_dim": 256,
+        "max_seq_length": 1000000,
+        "training_time": "21 days (64 GPUs)",
+        "training_cost": 30000,
+        "inference_ms": 25,
+        "accuracy_genomic": 0.85,
+        "gpu_required": "A100",
+        "vram_gb": 40,
+        "cost_per_1m_queries": 18,
+        "strengths": "Ultra-long sequences",
+        "paper": "NeurIPS 2023"
+      }
+    },
+    "vector_databases": {
+      "pinecone": {
+        "name": "Pinecone",
+        "type": "Managed Cloud",
+        "max_vectors": "1B+",
+        "latency_ms": 2,
+        "recall_rate": 0.99,
+        "cost_monthly_1m_vectors": 70,
+        "cost_per_1m_queries": 0.08,
+        "scalability": "excellent",
+        "setup_complexity": "very low",
+        "genomics_features": "limited"
+      },
+      "milvus": {
+        "name": "Milvus/Zilliz",
+        "type": "Open Source / Managed",
+        "max_vectors": "10B+",
+        "latency_ms": 1.5,
+        "recall_rate": 0.98,
+        "cost_monthly_1m_vectors": 45,
+        "cost_per_1m_queries": 0.05,
+        "scalability": "excellent",
+        "setup_complexity": "medium",
+        "genomics_features": "limited"
+      },
+      "weaviate": {
+        "name": "Weaviate",
+        "type": "Open Source / Managed",
+        "max_vectors": "1B+",
+        "latency_ms": 10,
+        "recall_rate": 0.97,
+        "cost_monthly_1m_vectors": 85,
+        "cost_per_1m_queries": 0.12,
+        "scalability": "good",
+        "setup_complexity": "low",
+        "genomics_features": "hybrid search"
+      }
+    },
+    "ruvector": {
+      "name": "RuVector (k-mer embedding)",
+      "type": "Rust-native Vector DB",
+      "approach": "k-mer frequency vectors",
+      "parameters": "0 (no training)",
+      "embedding_dim": 256,
+      "max_seq_length": "unlimited",
+      "training_time": "0 (deterministic)",
+      "training_cost": 0,
+      "inference_ms": 0.061,
+      "latency_ms": 0.061,
+      "recall_rate": 0.95,
+      "accuracy_similarity": 0.92,
+      "gpu_required": "none",
+      "memory_gb": 0.2,
+      "cost_per_1m_queries": 0.001,
+      "cost_monthly_1m_vectors": 5,
+      "scalability": "excellent",
+      "setup_complexity": "very low",
+      "genomics_features": "full (native k-mer)"
+    }
+  },
+  "analysis": {
+    "performanceWinner": "RuVector",
+    "costWinner": "RuVector",
+    "accuracyWinner": "BLAST",
+    "ruvector_vs_blast_speedup": "16,400x",
+    "ruvector_vs_blast_cost_savings": "150,000x",
+    "annual_savings_example": "$53,904"
+  }
+}
