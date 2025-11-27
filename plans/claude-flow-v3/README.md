@@ -25,6 +25,11 @@ Claude-Flow v3 transforms the existing JavaScript-based agent orchestration fram
 | [04-refinement.md](./04-refinement.md) | TDD strategy, test specifications |
 | [05-completion.md](./05-completion.md) | Integration, deployment, release process |
 | [06-roadmap.md](./06-roadmap.md) | Implementation timeline and milestones |
+| [07-gap-analysis.md](./07-gap-analysis.md) | Gap analysis from first review |
+| [08-addendum-missing-features.md](./08-addendum-missing-features.md) | Hive Mind, Hooks, Skills specs |
+| **[09-comprehensive-missing-features.md](./09-comprehensive-missing-features.md)** | **200+ missing features from deep analysis** |
+
+> **IMPORTANT**: Document 09 contains critical findings from a deep analysis revealing that the original plan covered only ~15-20% of available features. The revised timeline is 32-37 weeks (vs original 11-16 weeks).
 
 ## Key Technical Decisions
 
@@ -80,12 +85,26 @@ Leverage the existing RuVector codebase (29 Rust crates) for:
 
 ## Implementation Phases
 
+### MVP (v3.0.0) - 11-16 weeks
 1. **Foundation** (2-3 weeks): Core engine, vector DB, NAPI bindings
 2. **Swarm** (2-3 weeks): Orchestration, load balancing, health monitoring
 3. **Distributed** (3-4 weeks): Raft consensus, federated memory, graph DB
 4. **Intelligence** (2-3 weeks): GNN training, self-learning, AI routing
 5. **Polish** (1-2 weeks): WASM, documentation, benchmarks
 6. **Release** (1 week): npm publish, announcement
+
+### Extended Phases (v3.1.0 - v3.3.0) - 18-22 weeks
+7. **Hive Mind** (2 weeks): Queen types, collective intelligence, sessions
+8. **Hooks & Skills** (2 weeks): 8 hook types, 26 skills migration
+9. **Replication & Snapshots** (3 weeks): Multi-node sync, backup/restore
+10. **Graph Database Full** (3 weeks): Cypher, RAG, semantic search
+11. **Psycho-Symbolic** (2 weeks): Hybrid queries, GOAP planning
+12. **Model Routing** (1 week): Multi-provider, fallback chains
+13. **Distributed Patterns** (2 weeks): Map-reduce, sagas, streams
+14. **Learning Systems** (2 weeks): Continual, curriculum, online learning
+15. **Collective Intelligence** (2 weeks): Voting, reputation, emergence
+
+**Total Revised Timeline**: 32-37 weeks
 
 ## Getting Started
 

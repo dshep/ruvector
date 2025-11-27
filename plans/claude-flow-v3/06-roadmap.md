@@ -451,6 +451,167 @@ This document provides a detailed implementation roadmap for Claude-Flow v3, bre
 
 ---
 
+## ADDENDUM: Expanded Phases (from Deep Analysis)
+
+> **CRITICAL**: The deep analysis revealed 200+ missing features requiring additional phases.
+> See `09-comprehensive-missing-features.md` for complete details.
+
+### Phase 2.5: Hive Mind System (NEW)
+
+**Duration**: 2 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Queen types (Strategic, Tactical, Adaptive) | P0 | `queen.rs` |
+| Collective Intelligence | P0 | `collective.rs` |
+| Session management | P0 | `session.rs` |
+| Consensus algorithms | P0 | Majority, Weighted, Byzantine |
+| CLI commands | P0 | 11 hive-mind commands |
+
+### Phase 3.5: Hooks Automation (NEW)
+
+**Duration**: 1 week
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Hook types (8 types) | P0 | `hooks.rs` |
+| Settings.json parser | P0 | Config loader |
+| CLI commands | P0 | hooks commands |
+
+### Phase 4.5: Skills Migration (NEW)
+
+**Duration**: 1 week
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Skill loader | P0 | `loader.rs` |
+| YAML frontmatter parser | P0 | Parser |
+| 26 skills migration | P0 | Migrated skills |
+
+### Phase 7: Replication System (NEW)
+
+**Duration**: 2 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| ReplicaSet management | P0 | `replica.rs` |
+| Sync modes (Sync/Async/Semi) | P0 | `sync.rs` |
+| Conflict resolution (VectorClock, CRDT) | P0 | `conflict.rs` |
+| Failover management | P0 | `failover.rs` |
+| Change data capture | P1 | `stream.rs` |
+| CLI commands | P0 | 10 replication commands |
+
+### Phase 8: Snapshot System (NEW)
+
+**Duration**: 1 week
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| SnapshotManager | P0 | `manager.rs` |
+| Compression support | P1 | Compression |
+| Storage backends | P1 | Local, S3, etc. |
+| CLI commands | P0 | 5 snapshot commands |
+
+### Phase 9: Graph Database Full Integration (NEW)
+
+**Duration**: 3 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Full Cypher support | P0 | Query execution |
+| ACID transactions | P0 | Transaction manager |
+| RAG engine | P0 | `rag.rs` |
+| Semantic search | P0 | `semantic.rs` |
+| Distributed graph (Federation, Sharding) | P1 | Distributed impl |
+| CLI commands | P0 | 15 graph commands |
+
+### Phase 10: Psycho-Symbolic Integration (NEW)
+
+**Duration**: 2 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Hybrid query (symbolic + vector) | P0 | `hybrid.rs` |
+| GOAP planning | P1 | `goap.rs` |
+| Sentiment extraction | P2 | `sentiment.rs` |
+| CLI commands | P0 | 5 psycho commands |
+
+### Phase 11: Model Routing (NEW)
+
+**Duration**: 1 week
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Multi-provider support | P0 | `routing.rs` |
+| Capability-based selection | P0 | Selection logic |
+| Fallback chains | P0 | Fallback impl |
+| CLI commands | P0 | 4 routing commands |
+
+### Phase 12: Distributed Patterns (NEW)
+
+**Duration**: 2 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Map-reduce patterns | P1 | `mapreduce.rs` |
+| Saga transactions | P1 | `saga.rs` |
+| Stream processing | P2 | `stream.rs` |
+| Event-driven patterns | P2 | `events.rs` |
+
+### Phase 13: Learning Systems (NEW)
+
+**Duration**: 2 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Continual learning | P1 | `continual.rs` |
+| Curriculum learning | P2 | `curriculum.rs` |
+| Domain adaptation | P2 | `adaptation.rs` |
+| Online learning streams | P2 | `online.rs` |
+
+### Phase 14: Collective Intelligence (NEW)
+
+**Duration**: 2 weeks
+
+| Task | Priority | Deliverable |
+|------|----------|-------------|
+| Problem-solving sessions | P1 | `problem.rs` |
+| Knowledge sharing | P1 | `knowledge.rs` |
+| Voting systems | P1 | `voting.rs` |
+| Reputation/trust | P2 | `reputation.rs` |
+| Emergence simulation | P2 | `emergence.rs` |
+
+---
+
+## Revised Timeline (Visual)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                   Claude-Flow v3 REVISED Implementation Timeline                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│  ORIGINAL PHASES (11-16 weeks):                                                       │
+│  Phase 1-6: Foundation → Swarm → Distributed → Intelligence → Polish → Release       │
+│                                                                                       │
+│  + EXPANDED PHASES (22 weeks):                                                        │
+│  Phase 2.5: Hive Mind (2w)                                                           │
+│  Phase 3.5: Hooks Automation (1w)                                                     │
+│  Phase 4.5: Skills Migration (1w)                                                     │
+│  Phase 7: Replication (2w)                                                            │
+│  Phase 8: Snapshots (1w)                                                              │
+│  Phase 9: Graph Database Full (3w)                                                    │
+│  Phase 10: Psycho-Symbolic (2w)                                                       │
+│  Phase 11: Model Routing (1w)                                                         │
+│  Phase 12: Distributed Patterns (2w)                                                  │
+│  Phase 13: Learning Systems (2w)                                                      │
+│  Phase 14: Collective Intelligence (2w)                                               │
+│                                                                                       │
+│  TOTAL: 32-37 weeks                                                                   │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Risk Mitigation
 
 | Risk | Impact | Mitigation |
@@ -460,6 +621,8 @@ This document provides a detailed implementation roadmap for Claude-Flow v3, bre
 | API breaking changes | Medium | Compatibility layer |
 | Timeline slippage | Medium | Prioritized milestones |
 | Security issues | High | Audit, responsible disclosure |
+| **Scope creep (NEW)** | **High** | **Phased delivery, MVP first** |
+| **Integration complexity (NEW)** | **High** | **Incremental integration** |
 
 ---
 
@@ -469,12 +632,48 @@ This document provides a detailed implementation roadmap for Claude-Flow v3, bre
 |-------|------------------|-----------------|
 | Phase 1 | 2-3 weeks | Rust, NAPI-RS, TypeScript |
 | Phase 2 | 2-3 weeks | Rust, distributed systems |
+| Phase 2.5 | 2 weeks | Rust, coordination |
 | Phase 3 | 3-4 weeks | Rust, consensus, networking |
+| Phase 3.5 | 1 week | Rust, hooks |
 | Phase 4 | 2-3 weeks | Rust, ML, neural networks |
+| Phase 4.5 | 1 week | TypeScript, YAML |
 | Phase 5 | 1-2 weeks | Technical writing, testing |
 | Phase 6 | 1 week | DevOps, npm publishing |
+| Phase 7 | 2 weeks | Rust, replication |
+| Phase 8 | 1 week | Rust, storage |
+| Phase 9 | 3 weeks | Rust, graph databases |
+| Phase 10 | 2 weeks | Rust, symbolic AI |
+| Phase 11 | 1 week | Rust, routing |
+| Phase 12 | 2 weeks | Rust, distributed patterns |
+| Phase 13 | 2 weeks | Rust, ML |
+| Phase 14 | 2 weeks | Rust, multi-agent |
 
-**Total Estimated Duration**: 11-16 weeks
+**Original Estimated Duration**: 11-16 weeks
+**REVISED Total Duration**: 32-37 weeks
+
+### Recommended Delivery Strategy
+
+**MVP (v3.0.0)**: Phases 1-6 (11-16 weeks)
+- Core vector DB with NAPI
+- Swarm orchestration
+- Basic distributed features
+- GNN integration
+
+**v3.1.0**: Phases 2.5, 3.5, 4.5, 7-8 (6 weeks)
+- Hive Mind
+- Hooks
+- Skills
+- Replication & Snapshots
+
+**v3.2.0**: Phases 9-11 (6 weeks)
+- Full Graph Database
+- Psycho-Symbolic
+- Model Routing
+
+**v3.3.0**: Phases 12-14 (6 weeks)
+- Distributed Patterns
+- Learning Systems
+- Collective Intelligence
 
 ---
 
