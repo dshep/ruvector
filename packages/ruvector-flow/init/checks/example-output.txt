@@ -1,0 +1,244 @@
+🔍 Running @ruvector/flow initialization checks...
+
+1/6 Checking native bindings...
+  ✓ Native Bindings (NAPI-RS)
+    • Found: /home/user/ruvector/packages/ruvector-flow/native/ruvector.linux-x64.node
+    • ✓ createCollection() available
+    • ✓ insert() available
+    • ✓ search() available
+    • ✓ SIMD support: true
+    • ✓ Performance: {"platform":"linux","arch":"x64","simd":true}
+
+2/6 Checking WASM fallback...
+  ✓ WASM Fallback
+    • Found: /home/user/ruvector/packages/ruvector-flow/wasm/ruvector_bg.wasm
+    • Size: 2.34 MB
+    • ✓ SIMD support detected (better performance)
+    • ✓ 45 exports found
+    • ✓ 5/5 vector operations available
+    • ✓ Memory: 16 pages (1024 KB)
+
+3/6 Validating skills...
+  ✓ Skills (14 files)
+    • Found 14 skill file(s)
+    • Valid: 14/14
+    • ✓ All skills valid
+
+4/6 Validating agents...
+  ✓ Agents (10 files)
+    • Found 10 agent file(s)
+    • Valid: 10/10
+    • ✓ All agents valid
+
+5/6 Validating commands...
+  ✓ Commands (13 files)
+    • Found 13 command file(s)
+    • Valid: 13/13
+    • ✓ All commands valid
+
+6/6 Checking MCP server...
+  ✓ MCP Server (111+ tools)
+    • STDIO Transport: ✓
+    •   Found 115 tools
+    • SSE Transport: ✓
+    • Registered Tools: 115/111
+    •   coordination: 4/4 tools
+    •   monitoring: 5/5 tools
+    •   memory: 4/4 tools
+    •   neural: 4/4 tools
+    •   github: 5/5 tools
+    •   system: 4/4 tools
+    • Tool Execution: ✓
+    • ✓ MCP server fully operational
+
+============================================================
+✓ All checks passed!
+============================================================
+Validation completed in 1234ms
+6/6 checks passed (100%)
+============================================================
+
+
+================================================================================
+EXAMPLE: PARTIAL FAILURE OUTPUT
+================================================================================
+
+🔍 Running @ruvector/flow initialization checks...
+
+1/6 Checking native bindings...
+  ✗ Native Bindings (NAPI-RS)
+    Native .node file not found
+    • Expected: packages/ruvector-flow/native/
+    • Build native bindings with: npm run build:native
+    ⚠ Will fallback to WASM if available
+
+2/6 Checking WASM fallback...
+  ✓ WASM Fallback
+    • Found: /home/user/ruvector/packages/ruvector-flow/wasm/ruvector_bg.wasm
+    • Size: 2.34 MB
+    • ○ No SIMD support (will use fallback)
+    ⚠ SIMD not available
+    • ✓ 45 exports found
+    • ✓ 5/5 vector operations available
+
+3/6 Validating skills...
+  ✗ Skills (14 files)
+    • Found 12 skill file(s)
+    • Valid: 10/14
+    ⚠ Missing: agentdb-advanced.md
+    ⚠ Missing: flow-nexus-neural.md
+    ⚠ agentdb-learning: Missing Description section
+
+    Validation errors:
+      agentdb-learning: Missing Description section
+      github-code-review: Content too short (< 200 chars)
+
+4/6 Validating agents...
+  ✓ Agents (10 files)
+    • Found 10 agent file(s)
+    • Valid: 10/10
+    • ✓ All agents valid
+
+5/6 Validating commands...
+  ✗ Commands (13 files)
+    • Found 11 command file(s)
+    • Valid: 9/13
+    ⚠ Missing: deploy.md
+    ⚠ Missing: monitor.md
+    ⚠ init: Missing Examples
+
+    Validation errors:
+      init: Missing Examples
+      swarm: Missing Options/Parameters section
+
+6/6 Checking MCP server...
+  ✗ MCP Server (111+ tools)
+    • STDIO Transport: ✗
+    ⚠ STDIO: Connection timeout
+    • SSE Transport: ✗
+    ⚠ SSE: SSE endpoint not available
+    • Registered Tools: 95/111
+    •   coordination: 4/4 tools
+    •   monitoring: 3/5 tools
+    •   memory: 4/4 tools
+    •   neural: 4/4 tools
+    •   github: 5/5 tools
+    •   system: 4/4 tools
+    ⚠ monitoring: Missing task_status, task_results
+    • Tool Execution: ✗
+    ⚠ Execution: Tool not found
+    MCP server has issues
+
+============================================================
+✗ Some checks failed
+============================================================
+Validation completed in 2456ms
+3/6 checks passed (50%)
+4 check(s) failed
+12 warning(s) detected
+============================================================
+
+Failed checks:
+  • Native Bindings (NAPI-RS): Native .node file not found
+  • Skills (14 files): Missing 2 skill file(s)
+  • Commands (13 files): Missing 2 command file(s)
+  • MCP Server (111+ tools): MCP server has issues
+
+Warnings:
+  ⚠ Native Bindings (NAPI-RS): Will fallback to WASM if available
+  ⚠ WASM Fallback: SIMD not available
+  ⚠ Skills (14 files): Missing: agentdb-advanced.md
+  ⚠ Skills (14 files): Missing: flow-nexus-neural.md
+  ⚠ Skills (14 files): agentdb-learning: Missing Description section
+  ⚠ Commands (13 files): Missing: deploy.md
+  ⚠ Commands (13 files): Missing: monitor.md
+  ⚠ Commands (13 files): init: Missing Examples
+  ⚠ MCP Server (111+ tools): STDIO: Connection timeout
+  ⚠ MCP Server (111+ tools): SSE: SSE endpoint not available
+  ⚠ MCP Server (111+ tools): Only 95 tools registered (expected 111+)
+  ⚠ MCP Server (111+ tools): monitoring: Missing task_status, task_results
+  ⚠ MCP Server (111+ tools): Execution: Tool not found
+
+
+================================================================================
+EXAMPLE: CRITICAL FAILURE OUTPUT
+================================================================================
+
+🔍 Running @ruvector/flow initialization checks...
+
+1/6 Checking native bindings...
+  ✗ Native Bindings (NAPI-RS)
+    Native directory not found
+    • Expected: packages/ruvector-flow/native/
+
+2/6 Checking WASM fallback...
+  ✗ WASM Fallback
+    WASM directory not found
+    • Expected: packages/ruvector-flow/wasm/
+    ⚠ No fallback available if native bindings fail
+
+3/6 Validating skills...
+  ✗ Skills (14 files)
+    Skills directory not found
+    • Expected: packages/ruvector-flow/init/skills/
+
+4/6 Validating agents...
+  ✗ Agents (10 files)
+    Agents directory not found
+    • Expected: packages/ruvector-flow/init/agents/
+
+5/6 Validating commands...
+  ✗ Commands (13 files)
+    Commands directory not found
+    • Expected: packages/ruvector-flow/init/commands/
+
+6/6 Checking MCP server...
+  ✗ MCP Server (111+ tools)
+    • STDIO Transport: ✗
+    ⚠ STDIO: Failed to spawn MCP server
+    • SSE Transport: ✗
+    ⚠ SSE: SSE endpoint not available
+    • Registered Tools: 0/111
+    •   coordination: 0/4 tools
+    •   monitoring: 0/5 tools
+    •   memory: 0/4 tools
+    •   neural: 0/4 tools
+    •   github: 0/5 tools
+    •   system: 0/4 tools
+    ⚠ coordination: Missing swarm_init, agent_spawn, task_orchestrate, topology_configure
+    ⚠ monitoring: Missing swarm_status, agent_list, agent_metrics, task_status, task_results
+    ⚠ memory: Missing memory_usage, memory_store, memory_retrieve, memory_search
+    ⚠ neural: Missing neural_status, neural_train, neural_patterns, neural_predict
+    ⚠ github: Missing github_swarm, repo_analyze, pr_enhance, issue_triage, code_review
+    ⚠ system: Missing benchmark_run, features_detect, swarm_monitor, performance_report
+    • Tool Execution: ✗
+    ⚠ Execution: No tools available
+    Missing tools (0/111)
+
+============================================================
+✗ Some checks failed
+============================================================
+Validation completed in 3891ms
+0/6 checks passed (0%)
+6 check(s) failed
+24 warning(s) detected
+============================================================
+
+Failed checks:
+  • Native Bindings (NAPI-RS): Native directory not found
+  • WASM Fallback: WASM directory not found
+  • Skills (14 files): Skills directory not found
+  • Agents (10 files): Agents directory not found
+  • Commands (13 files): Commands directory not found
+  • MCP Server (111+ tools): Missing tools (0/111)
+
+Warnings:
+  ⚠ WASM Fallback: No fallback available if native bindings fail
+  ⚠ MCP Server (111+ tools): STDIO: Failed to spawn MCP server
+  ⚠ MCP Server (111+ tools): SSE: SSE endpoint not available
+  ⚠ MCP Server (111+ tools): Only 0 tools registered (expected 111+)
+  [... 20+ more warnings ...]
+
+ERROR: Package is not properly configured. Please run:
+  npm run build
+  npm run setup
