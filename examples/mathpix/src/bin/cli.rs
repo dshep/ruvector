@@ -25,18 +25,18 @@ async fn main() -> Result<()> {
         .init();
 
     // Execute the command
-    match cli.command {
+    match &cli.command {
         Commands::Ocr(args) => {
-            ruvector_mathpix::cli::commands::ocr::execute(args, &cli).await?;
+            ruvector_mathpix::cli::commands::ocr::execute(args.clone(), &cli).await?;
         }
         Commands::Batch(args) => {
-            ruvector_mathpix::cli::commands::batch::execute(args, &cli).await?;
+            ruvector_mathpix::cli::commands::batch::execute(args.clone(), &cli).await?;
         }
         Commands::Serve(args) => {
-            ruvector_mathpix::cli::commands::serve::execute(args, &cli).await?;
+            ruvector_mathpix::cli::commands::serve::execute(args.clone(), &cli).await?;
         }
         Commands::Config(args) => {
-            ruvector_mathpix::cli::commands::config::execute(args, &cli).await?;
+            ruvector_mathpix::cli::commands::config::execute(args.clone(), &cli).await?;
         }
         Commands::Version => {
             println!("mathpix-cli v{}", env!("CARGO_PKG_VERSION"));
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
             use clap::CommandFactory;
             use clap_complete::{generate, Shell};
 
-            let shell = shell.unwrap_or_else(|| {
+            let shell = shell.clone().unwrap_or_else(|| {
                 Shell::from_env().unwrap_or(Shell::Bash)
             });
 

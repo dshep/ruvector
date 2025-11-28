@@ -11,7 +11,7 @@ use crate::cli::{output, Cli, OutputFormat};
 use super::{OcrConfig, OcrResult};
 
 /// Process multiple files in batch mode
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct BatchArgs {
     /// Input pattern (glob) or directory
     #[arg(value_name = "PATTERN", help = "Input pattern (glob) or directory")]

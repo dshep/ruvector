@@ -21,7 +21,7 @@ use crate::cli::Cli;
 use super::{OcrConfig, OcrResult};
 
 /// Start the API server
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct ServeArgs {
     /// Port to listen on
     #[arg(

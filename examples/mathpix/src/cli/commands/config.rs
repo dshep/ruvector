@@ -8,13 +8,13 @@ use crate::cli::Cli;
 use super::OcrConfig;
 
 /// Manage configuration
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct ConfigArgs {
     #[command(subcommand)]
     pub command: ConfigCommand,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ConfigCommand {
     /// Generate default configuration file
     Init {

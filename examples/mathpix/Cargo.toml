@@ -96,8 +96,6 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", features = ["console", "Window", "Document", "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData"], optional = true }
-getrandom = { workspace = true, optional = true }
-
 [dev-dependencies]
 axum-test = "15.0"
 mockall = "0.13"
@@ -115,7 +113,7 @@ cache = []
 ocr = ["ort", "preprocess"]
 math = []
 optimize = ["memmap2", "rayon"]
-wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys", "getrandom"]
+wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]
 
 [[bin]]
 name = "mathpix-cli"
@@ -188,24 +186,6 @@ harness = false
 name = "memory"
 harness = false
 
-# WebAssembly bindings (optional)
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
-web-sys = { version = "0.3", features = [
-    "Window",
-    "Document",
-    "HtmlCanvasElement",
-    "CanvasRenderingContext2d",
-    "ImageData",
-    "Blob",
-    "Url",
-    "MessageEvent",
-    "Worker",
-    "DedicatedWorkerGlobalScope",
-    "console"
-], optional = true }
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -223,8 +203,7 @@ web-sys = { version = "0.3", features = [
     "DedicatedWorkerGlobalScope",
     "console"
 ] }
-getrandom = { version = "0.3", features = ["js"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"
-wee_alloc = "0.4"
 serde-wasm-bindgen = "0.6"
 tracing-wasm = "0.2"

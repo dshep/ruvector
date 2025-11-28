@@ -8,7 +8,7 @@ use crate::cli::{output, Cli, OutputFormat};
 use super::{OcrConfig, OcrResult};
 
 /// Process a single image or file with OCR
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct OcrArgs {
     /// Path to the image file to process
     #[arg(value_name = "FILE", help = "Path to the image file")]
