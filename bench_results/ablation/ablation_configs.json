@@ -1,0 +1,82 @@
+[
+  {
+    "name": "baseline_hnsw",
+    "description": "Pure HNSW without GNN enhancement",
+    "use_attention": false,
+    "use_gru": false,
+    "use_layer_norm": false,
+    "num_heads": 0,
+    "hidden_dim": 0,
+    "dropout": 0.0
+  },
+  {
+    "name": "hnsw_attention",
+    "description": "HNSW + Multi-head Attention only",
+    "use_attention": true,
+    "use_gru": false,
+    "use_layer_norm": false,
+    "num_heads": 4,
+    "hidden_dim": 128,
+    "dropout": 0.0
+  },
+  {
+    "name": "hnsw_gru",
+    "description": "HNSW + GRU State Updates only",
+    "use_attention": false,
+    "use_gru": true,
+    "use_layer_norm": false,
+    "num_heads": 0,
+    "hidden_dim": 128,
+    "dropout": 0.0
+  },
+  {
+    "name": "hnsw_layernorm",
+    "description": "HNSW + Layer Normalization only",
+    "use_attention": false,
+    "use_gru": false,
+    "use_layer_norm": true,
+    "num_heads": 0,
+    "hidden_dim": 128,
+    "dropout": 0.0
+  },
+  {
+    "name": "hnsw_attention_gru",
+    "description": "HNSW + Attention + GRU",
+    "use_attention": true,
+    "use_gru": true,
+    "use_layer_norm": false,
+    "num_heads": 4,
+    "hidden_dim": 128,
+    "dropout": 0.0
+  },
+  {
+    "name": "full_gnn",
+    "description": "Full GNN with all components",
+    "use_attention": true,
+    "use_gru": true,
+    "use_layer_norm": true,
+    "num_heads": 4,
+    "hidden_dim": 128,
+    "dropout": 0.1
+  },
+  {
+    "name": "full_gnn_8heads",
+    "description": "Full GNN with 8 attention heads",
+    "use_attention": true,
+    "use_gru": true,
+    "use_layer_norm": true,
+    "num_heads": 8,
+    "hidden_dim": 128,
+    "dropout": 0.1
+  },
+  {
+    "name": "full_gnn_256dim",
+    "description": "Full GNN with 256 hidden dimension",
+    "use_attention": true,
+    "use_gru": true,
+    "use_layer_norm": true,
+    "num_heads": 4,
+    "hidden_dim": 256,
+    "dropout": 0.1
+  }
+]

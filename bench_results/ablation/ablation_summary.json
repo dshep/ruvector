@@ -1,0 +1,90 @@
+[
+  {
+    "config_name": "baseline_hnsw",
+    "mean_qps": 488.2149357271384,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9550000000000002,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.4809999999999999,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": 0.0
+  },
+  {
+    "config_name": "hnsw_attention",
+    "mean_qps": 492.40287363165675,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9911200000000003,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.638,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": 0.8578061829019801
+  },
+  {
+    "config_name": "hnsw_gru",
+    "mean_qps": 483.9404506629631,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9662800000000002,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.6949999999999998,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": -0.8755334487686242
+  },
+  {
+    "config_name": "hnsw_layernorm",
+    "mean_qps": 470.52094083560524,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9645500000000002,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.631,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": -3.624222365335888
+  },
+  {
+    "config_name": "hnsw_attention_gru",
+    "mean_qps": 482.269022508402,
+    "std_qps": 0.0,
+    "mean_recall_10": 1.0,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.642,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": -1.2178884306111437
+  },
+  {
+    "config_name": "full_gnn",
+    "mean_qps": 415.409759626092,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9712800000000001,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.868,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": -14.912525359883084
+  },
+  {
+    "config_name": "full_gnn_8heads",
+    "mean_qps": 439.1001333033358,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9895200000000004,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.6509999999999998,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": -10.060077811968606
+  },
+  {
+    "config_name": "full_gnn_256dim",
+    "mean_qps": 363.9681941006856,
+    "std_qps": 0.0,
+    "mean_recall_10": 0.9712800000000005,
+    "std_recall_10": 0.0,
+    "mean_latency_p99": 1.952,
+    "std_latency_p99": 0.0,
+    "mean_memory_mb": 0.0,
+    "improvement_percent": -25.4491889809561
+  }
+]

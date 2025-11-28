@@ -1,0 +1,13 @@
+{
+  "proof_id": "ed2551",
+  "version": "0.1.16",
+  "timestamp": "2025-11-28T19:40:15Z",
+  "rust_version": "1.91.1",
+  "cargo_version": "1.91.1",
+  "os": "Linux 4.4.0",
+  "arch": "x86_64",
+  "cpu_info": "unknown",
+  "memory_gb": 13,
+  "quick_mode": true,
+  "full_mode": false
+}

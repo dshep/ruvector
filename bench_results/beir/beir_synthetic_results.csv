@@ -1,0 +1,3 @@
+dataset,split,ef_search,ndcg@10,map@10,recall@10,recall@100,mrr@10,qps,p99_ms
+synthetic,test,50,0.2243,0.0690,0.0690,0.0690,0.7000,550.67,0.93
+synthetic,test,100,0.2422,0.0805,0.0805,0.0805,0.7500,682.04,0.81
