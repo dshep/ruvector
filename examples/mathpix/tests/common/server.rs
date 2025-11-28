@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use super::types::{OutputFormat, ProcessingOptions, ProcessingResult, CacheStats};
 
 #[derive(Clone)]
 pub struct TestServer {
@@ -12,6 +13,7 @@ pub struct TestServer {
 
 struct TestServerInner {
     base_url: String,
+    #[allow(dead_code)]
     process: Option<RwLock<tokio::process::Child>>,
     config: TestServerConfig,
 }
@@ -112,16 +114,10 @@ impl TestServer {
 
     /// Start test server with custom configuration
     pub async fn with_config(config: TestServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        // For now, use a mock implementation
-        // In real implementation, this would spawn the actual server process
+        // Test infrastructure - provides mock server for testing
+        // Real OCR processing requires ONNX models to be configured
 
         let base_url = format!("http://localhost:{}", config.port);
-
-        // Spawn server process (mock)
-        // In real implementation:
-        // let mut cmd = tokio::process::Command::new("target/debug/mathpix-api");
-        // cmd.arg("--port").arg(config.port.to_string());
-        // let child = cmd.spawn()?;
 
         let inner = Arc::new(TestServerInner {
             base_url,
@@ -141,18 +137,17 @@ impl TestServer {
     }
 
     /// Process a single image
+    /// Note: This is test infrastructure that returns mock data.
+    /// Real OCR requires ONNX models to be configured.
     pub async fn process_image(
         &self,
-        image_path: &str,
-        format: super::super::integration::pipeline_tests::OutputFormat,
-    ) -> Result<super::super::integration::pipeline_tests::ProcessingResult, String> {
-        // Mock implementation
-        // In real implementation, this would call the actual API
-
-        // Simulate processing delay
+        _image_path: &str,
+        _format: OutputFormat,
+    ) -> Result<ProcessingResult, String> {
+        // Test infrastructure mock - real OCR requires models
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        Ok(super::super::integration::pipeline_tests::ProcessingResult {
+        Ok(ProcessingResult {
             latex: "x + y".to_string(),
             mathml: Some("<math><mrow><mi>x</mi><mo>+</mo><mi>y</mi></mrow></math>".to_string()),
             html: None,
@@ -167,9 +162,9 @@ impl TestServer {
     pub async fn process_image_with_options(
         &self,
         image_path: &str,
-        format: super::super::integration::pipeline_tests::OutputFormat,
-        options: super::super::integration::pipeline_tests::ProcessingOptions,
-    ) -> Result<super::super::integration::pipeline_tests::ProcessingResult, String> {
+        format: OutputFormat,
+        _options: ProcessingOptions,
+    ) -> Result<ProcessingResult, String> {
         self.process_image(image_path, format).await
     }
 
@@ -177,8 +172,8 @@ impl TestServer {
     pub async fn process_batch(
         &self,
         image_paths: &[&str],
-        format: super::super::integration::pipeline_tests::OutputFormat,
-    ) -> Result<Vec<super::super::integration::pipeline_tests::ProcessingResult>, String> {
+        format: OutputFormat,
+    ) -> Result<Vec<ProcessingResult>, String> {
         let mut results = Vec::new();
         for path in image_paths {
             results.push(self.process_image(path, format.clone()).await?);
@@ -187,8 +182,8 @@ impl TestServer {
     }
 
     /// Get cache statistics
-    pub async fn cache_stats(&self) -> Result<super::super::integration::cache_tests::CacheStats, String> {
-        Ok(super::super::integration::cache_tests::CacheStats {
+    pub async fn cache_stats(&self) -> Result<CacheStats, String> {
+        Ok(CacheStats {
             hits: 0,
             misses: 0,
             evictions: 0,
@@ -204,11 +199,6 @@ impl TestServer {
 
     /// Shutdown server
     pub async fn shutdown(self) {
-        // In real implementation, would kill the server process
-        if let Some(process) = &self.inner.process {
-            if let Ok(mut child) = process.write().await.try_borrow_mut() {
-                let _ = child.kill().await;
-            }
-        }
+        // Test infrastructure - no actual server to shut down
     }
 }

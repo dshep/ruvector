@@ -9,6 +9,11 @@
 //! - Trigonometric functions
 //! - Greek letters and special symbols
 //! - Complex nested expressions
+//!
+//! NOTE: These tests require the `math` feature to be enabled.
+//! Run with: cargo test --features math
+
+#![cfg(feature = "math")]
 
 use ruvector_mathpix::math::{
     parse_expression, to_asciimath, to_latex, to_mathml, AsciiMathGenerator, LaTeXConfig,
