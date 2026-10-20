@@ -3,31 +3,24 @@ name: Publish @dshep/ruvector-core
 # Builds the Node engine for all five platforms, checks on every platform the
 # runner can execute that a closed store's file opens again, and publishes
 # @dshep/ruvector-core plus its five @dshep/ruvector-core-<platform> packages to
-# GitHub Packages. Started by hand only: a publish cannot be taken back cleanly.
-# With `publish` false (the default) it builds, checks and assembles, and
-# publishes nothing.
+# GitHub Packages. Builds the engine of the commit it runs on, never the
+# default branch's.
 
 on:
-  # A pull request touching the engine or this packaging builds, checks and
-  # assembles, and never publishes.
+  # A pull request into a ledgerdb release line builds, checks and assembles,
+  # and never publishes.
   pull_request:
-    branches: [main]
+    branches: ['ledgerdb-*']
     paths:
       - 'crates/ruvector-node/**'
       - 'crates/ruvector-core/**'
       - 'npm/packages/dshep-core/**'
       - '.github/workflows/publish-dshep-core.yml'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to publish: <upstream @ruvector/core version>-ledgerdb.<n>, e.g. 0.1.33-ledgerdb.1'
-        required: true
-        type: string
-      publish:
-        description: 'Publish to GitHub Packages (false = build, check and assemble only)'
-        required: false
-        type: boolean
-        default: false
+  # Pushing the tag dshep-core-v<upstream>-ledgerdb.<n> publishes that version
+  # from the tagged commit. A publish cannot be taken back cleanly, so the tag
+  # is the one deliberate act that starts it.
+  push:
+    tags: ['dshep-core-v*']
 
 permissions:
   contents: read
@@ -149,8 +142,9 @@ jobs:
       - name: Assemble packages
         shell: bash
         run: |
-          VERSION="${{ inputs.version }}"
-          if [ -z "$VERSION" ]; then
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#dshep-core-v}"
+          else
             # A pull request names no version; assemble under the first counter
             # for this upstream version, as a dry run.
             VERSION="$(node -p "require('./npm/packages/core/package.json').version")-ledgerdb.1"
@@ -162,7 +156,7 @@ jobs:
           for dir in dist/*/; do (cd "$dir" && npm pack --dry-run); done
 
       - name: Publish platform packages, then the main package
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
