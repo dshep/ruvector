@@ -22,6 +22,8 @@ use std::collections::HashMap;
 #[cfg(feature = "storage")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "storage")]
+use std::mem::ManuallyDrop;
+#[cfg(feature = "storage")]
 use std::sync::Arc;
 
 #[cfg(feature = "storage")]
@@ -40,7 +42,9 @@ static DB_POOL: Lazy<Mutex<HashMap<PathBuf, Arc<Database>>>> =
 
 /// Storage backend for vector database
 pub struct VectorStorage {
-    db: Arc<Database>,
+    /// Shared with the pool entry under `pool_key`; released in `Drop`.
+    db: ManuallyDrop<Arc<Database>>,
+    pool_key: PathBuf,
     dimensions: usize,
 }
 
@@ -120,12 +124,16 @@ impl VectorStorage {
                 }
                 write_txn.commit()?;
 
-                pool.insert(path_buf, Arc::clone(&new_db));
+                pool.insert(path_buf.clone(), Arc::clone(&new_db));
                 new_db
             }
         };
 
-        Ok(Self { db, dimensions })
+        Ok(Self {
+            db: ManuallyDrop::new(db),
+            pool_key: path_buf,
+            dimensions,
+        })
     }
 
     /// Insert a vector entry
@@ -321,6 +329,27 @@ impl VectorStorage {
     /// Get the stored dimensions
     pub fn dimensions(&self) -> usize {
         self.dimensions
+    }
+}
+
+/// Dropping the last storage on a file removes its pool entry, which drops the
+/// database and releases the file lock. The handle is dropped and the entry
+/// checked under the pool lock, where every other clone and drop of a pooled
+/// handle also happens, so an open running at the same time either shares the
+/// entry before it is checked or creates a fresh one after it is removed.
+#[cfg(feature = "storage")]
+impl Drop for VectorStorage {
+    fn drop(&mut self) {
+        let mut pool = DB_POOL.lock();
+        // SAFETY: `self.db` is taken once, here, and never used again.
+        let db = unsafe { ManuallyDrop::take(&mut self.db) };
+        let last_holder = pool
+            .get(&self.pool_key)
+            .is_some_and(|pooled| Arc::ptr_eq(pooled, &db) && Arc::strong_count(&db) == 2);
+        drop(db);
+        if last_holder {
+            pool.remove(&self.pool_key);
+        }
     }
 }
 

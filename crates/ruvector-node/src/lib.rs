@@ -7,13 +7,14 @@
 #![warn(clippy::pedantic)]
 
 use napi::bindgen_prelude::*;
+use napi::JsObject;
 use napi_derive::napi;
 use ruvector_core::{
     types::{DbOptions, HnswConfig, QuantizationConfig},
-    DistanceMetric, SearchQuery, SearchResult, VectorDB as CoreVectorDB, VectorEntry,
+    DistanceMetric, RuvectorError, SearchQuery, SearchResult, VectorDB as CoreVectorDB,
+    VectorEntry,
 };
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Import new crates
@@ -221,7 +222,147 @@ impl From<SearchResult> for JsSearchResult {
 /// High-performance vector database with HNSW indexing
 #[napi]
 pub struct VectorDB {
-    inner: Arc<RwLock<CoreVectorDB>>,
+    /// `None` once `close()` has released the database.
+    inner: Arc<RwLock<Option<CoreVectorDB>>>,
+    /// The calls issued on this handle that have not finished yet.
+    calls: Arc<Calls>,
+}
+
+/// Run `f` against the open database, or fail as closed: `inner` is `None`
+/// for a call issued after `close()`, and holds `None` once `close()` has
+/// released the database.
+fn with_open<T>(
+    inner: Option<&RwLock<Option<CoreVectorDB>>>,
+    f: impl FnOnce(&CoreVectorDB) -> ruvector_core::Result<T>,
+) -> ruvector_core::Result<T> {
+    let closed = || {
+        Err(RuvectorError::StorageError(
+            "the database is closed".to_string(),
+        ))
+    };
+    let Some(inner) = inner else {
+        return closed();
+    };
+    let guard = inner.read().expect("RwLock poisoned");
+    match guard.as_ref() {
+        Some(db) => f(db),
+        None => closed(),
+    }
+}
+
+#[derive(Default)]
+struct CallState {
+    in_flight: usize,
+    closed: bool,
+}
+
+/// Counts the calls issued on one handle, so `close()` can wait for them.
+///
+/// A call registers synchronously at the JS call site, before its promise is
+/// returned: the work itself starts later on another thread, so registering
+/// there would let a `close()` issued after the call overtake it.
+#[derive(Default)]
+struct Calls {
+    state: Mutex<CallState>,
+    idle: Condvar,
+}
+
+/// Keeps `close()` waiting until the call holding it has finished its work.
+/// Empty for a call issued after `close()`, which then fails as closed.
+struct CallGuard(Option<Arc<Calls>>);
+
+impl Calls {
+    // A poisoned lock only means a panic elsewhere; the counter stays valid.
+    fn lock(&self) -> MutexGuard<'_, CallState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn register(self: &Arc<Self>) -> CallGuard {
+        let mut state = self.lock();
+        if state.closed {
+            return CallGuard(None);
+        }
+        state.in_flight += 1;
+        CallGuard(Some(Arc::clone(self)))
+    }
+
+    /// Refuse every call registered from now on.
+    fn close(&self) {
+        self.lock().closed = true;
+    }
+
+    /// Wait until every call registered before `close()` has finished.
+    fn wait_idle(&self) {
+        let mut state = self.lock();
+        while state.in_flight > 0 {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl CallGuard {
+    fn is_registered(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if let Some(calls) = self.0.take() {
+            let mut state = calls.lock();
+            state.in_flight -= 1;
+            if state.in_flight == 0 {
+                calls.idle.notify_all();
+            }
+        }
+    }
+}
+
+impl VectorDB {
+    fn open(db: CoreVectorDB) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(db))),
+            calls: Arc::new(Calls::default()),
+        }
+    }
+
+    /// Register a call now and return the promise of its result.
+    ///
+    /// `work` runs on the blocking pool, converts its arguments there, and
+    /// releases the registration when it returns. A call issued after
+    /// `close()` gets no database, so it fails as closed even when it runs
+    /// before `close()` has dropped the engine. `resolve` builds the JS value
+    /// on the JS thread.
+    fn call<T, V>(
+        &self,
+        env: Env,
+        work: impl FnOnce(Option<&RwLock<Option<CoreVectorDB>>>) -> Result<T> + Send + 'static,
+        resolve: impl FnOnce(T) -> Result<V> + 'static,
+    ) -> Result<JsObject>
+    where
+        T: Send + 'static,
+        V: ToNapiValue + 'static,
+    {
+        let registration = self.calls.register();
+        let db = registration
+            .is_registered()
+            .then(|| Arc::clone(&self.inner));
+        env.execute_tokio_future(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let result = work(db.as_deref());
+                    drop(registration);
+                    result
+                })
+                .await
+                .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            },
+            move |_env, value| resolve(value),
+        )
+    }
 }
 
 #[napi]
@@ -247,9 +388,7 @@ impl VectorDB {
         let db = CoreVectorDB::new(core_options)
             .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
-        Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
-        })
+        Ok(Self::open(db))
     }
 
     /// Create a vector database with default options
@@ -263,9 +402,7 @@ impl VectorDB {
         let db = CoreVectorDB::with_dimensions(dimensions as usize)
             .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
-        Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
-        })
+        Ok(Self::open(db))
     }
 
     /// Insert a vector entry into the database
@@ -279,18 +416,17 @@ impl VectorDB {
     ///   metadata: { text: 'example' }
     /// });
     /// ```
-    #[napi]
-    pub async fn insert(&self, entry: JsVectorEntry) -> Result<String> {
-        let core_entry = entry.to_core()?;
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.insert(core_entry)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn insert(&self, env: Env, entry: JsVectorEntry) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                let core_entry = entry.to_core()?;
+                with_open(db, |db| db.insert(core_entry))
+                    .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Insert multiple vectors in a batch
@@ -304,19 +440,20 @@ impl VectorDB {
     ///   { vector: new Float32Array([4, 5, 6]) }
     /// ]);
     /// ```
-    #[napi]
-    pub async fn insert_batch(&self, entries: Vec<JsVectorEntry>) -> Result<Vec<String>> {
-        let core_entries: Result<Vec<VectorEntry>> = entries.iter().map(|e| e.to_core()).collect();
-        let core_entries = core_entries?;
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.insert_batch(core_entries)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn insert_batch(&self, env: Env, entries: Vec<JsVectorEntry>) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                let core_entries: Vec<VectorEntry> = entries
+                    .iter()
+                    .map(JsVectorEntry::to_core)
+                    .collect::<Result<_>>()?;
+                with_open(db, |db| db.insert_batch(core_entries))
+                    .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Search for similar vectors
@@ -331,19 +468,22 @@ impl VectorDB {
     ///   filter: { category: 'example' }
     /// });
     /// ```
-    #[napi]
-    pub async fn search(&self, query: JsSearchQuery) -> Result<Vec<JsSearchResult>> {
-        let core_query = query.to_core()?;
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.search(core_query)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
-        .map(|results| results.into_iter().map(Into::into).collect())
+    #[napi(ts_return_type = "Promise<Array<JsSearchResult>>")]
+    pub fn search(&self, env: Env, query: JsSearchQuery) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                let core_query = query.to_core()?;
+                with_open(db, |db| db.search(core_query))
+                    .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
+            },
+            |results| {
+                Ok(results
+                    .into_iter()
+                    .map(JsSearchResult::from)
+                    .collect::<Vec<_>>())
+            },
+        )
     }
 
     /// Delete a vector by ID
@@ -354,17 +494,16 @@ impl VectorDB {
     /// ```javascript
     /// const deleted = await db.delete('vector-id');
     /// ```
-    #[napi]
-    pub async fn delete(&self, id: String) -> Result<bool> {
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.delete(&id)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Delete failed: {}", e)))
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn delete(&self, env: Env, id: String) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.delete(&id))
+                    .map_err(|e| Error::from_reason(format!("Delete failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Get a vector by ID
@@ -378,28 +517,27 @@ impl VectorDB {
     ///   console.log('Found:', entry.metadata);
     /// }
     /// ```
-    #[napi]
-    pub async fn get(&self, id: String) -> Result<Option<JsVectorEntry>> {
-        let db = self.inner.clone();
+    #[napi(ts_return_type = "Promise<JsVectorEntry | null>")]
+    pub fn get(&self, env: Env, id: String) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.get(&id))
+                    .map_err(|e| Error::from_reason(format!("Get failed: {}", e)))
+            },
+            |result| {
+                Ok(result.map(|entry| {
+                    // Convert HashMap to JSON string
+                    let metadata = entry.metadata.and_then(|m| serde_json::to_string(&m).ok());
 
-        let result = tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.get(&id)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Get failed: {}", e)))?;
-
-        Ok(result.map(|entry| {
-            // Convert HashMap to JSON string
-            let metadata = entry.metadata.and_then(|m| serde_json::to_string(&m).ok());
-
-            JsVectorEntry {
-                id: entry.id,
-                vector: Float32Array::new(entry.vector),
-                metadata,
-            }
-        }))
+                    JsVectorEntry {
+                        id: entry.id,
+                        vector: Float32Array::new(entry.vector),
+                        metadata,
+                    }
+                }))
+            },
+        )
     }
 
     /// Get the number of vectors in the database
@@ -409,18 +547,16 @@ impl VectorDB {
     /// const count = await db.len();
     /// console.log(`Database contains ${count} vectors`);
     /// ```
-    #[napi]
-    pub async fn len(&self) -> Result<u32> {
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.len()
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Len failed: {}", e)))
-        .map(|len| len as u32)
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn len(&self, env: Env) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.len())
+                    .map_err(|e| Error::from_reason(format!("Len failed: {}", e)))
+            },
+            |len| Ok(len as u32),
+        )
     }
 
     /// Check if the database is empty
@@ -431,17 +567,52 @@ impl VectorDB {
     ///   console.log('Database is empty');
     /// }
     /// ```
-    #[napi]
-    pub async fn is_empty(&self) -> Result<bool> {
-        let db = self.inner.clone();
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn is_empty(&self, env: Env) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.is_empty())
+                    .map_err(|e| Error::from_reason(format!("IsEmpty failed: {}", e)))
+            },
+            Ok,
+        )
+    }
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.is_empty()
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("IsEmpty failed: {}", e)))
+    /// Close the database and release its storage file
+    ///
+    /// Any call issued after `close()` rejects with "the database is closed";
+    /// calls issued before it finish normally. The returned promise resolves
+    /// once those calls have finished and the database is released, without
+    /// blocking the JS thread meanwhile; it waits as long as they take. The
+    /// store's file lock is released when the last handle on that file in
+    /// this process closes. Calling it again returns a promise that resolves
+    /// no earlier than the first.
+    ///
+    /// # Example
+    /// ```javascript
+    /// await db.close();
+    /// const reopened = new VectorDB({ dimensions: 384, storagePath: './vectors.db' });
+    /// ```
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn close(&self, env: Env) -> Result<JsObject> {
+        self.calls.close();
+        let calls = Arc::clone(&self.calls);
+        let db = Arc::clone(&self.inner);
+        env.execute_tokio_future(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    calls.wait_idle();
+                    // Dropped while the lock is held, so a second close(),
+                    // which takes the lock too, resolves no earlier than this.
+                    let mut slot = db.write().unwrap_or_else(PoisonError::into_inner);
+                    drop(slot.take());
+                })
+                .await
+                .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))
+            },
+            |_env, ()| Ok(()),
+        )
     }
 }
 
@@ -775,5 +946,102 @@ pub fn get_health() -> JsHealthResponse {
         },
         version: health.version,
         uptime_seconds: health.uptime_seconds as i64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallGuard, Calls};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    const STILL_WAITING: Duration = Duration::from_millis(100);
+    const RELEASED: Duration = Duration::from_secs(5);
+
+    fn in_flight(calls: &Calls) -> usize {
+        calls.lock().in_flight
+    }
+
+    /// Start `wait_idle` on another thread; the receiver hears when it returns.
+    fn waiter(calls: &Arc<Calls>) -> mpsc::Receiver<()> {
+        let (done, heard) = mpsc::channel();
+        let calls = Arc::clone(calls);
+        thread::spawn(move || {
+            calls.wait_idle();
+            done.send(()).unwrap();
+        });
+        heard
+    }
+
+    #[test]
+    fn a_call_registered_before_close_holds_the_waiter_until_it_finishes() {
+        let calls = Arc::new(Calls::default());
+        let guard = calls.register();
+        assert!(guard.is_registered());
+        calls.close();
+
+        let heard = waiter(&calls);
+        assert!(
+            heard.recv_timeout(STILL_WAITING).is_err(),
+            "the waiter returned with a call in flight"
+        );
+
+        drop(guard);
+        heard
+            .recv_timeout(RELEASED)
+            .expect("the waiter was not released when the call finished");
+        assert_eq!(in_flight(&calls), 0);
+    }
+
+    #[test]
+    fn the_waiter_is_released_only_by_the_last_call() {
+        let calls = Arc::new(Calls::default());
+        let guards: Vec<CallGuard> = (0..3).map(|_| calls.register()).collect();
+        assert_eq!(in_flight(&calls), 3);
+        calls.close();
+
+        let heard = waiter(&calls);
+        let mut guards = guards.into_iter();
+        for _ in 0..2 {
+            drop(guards.next());
+            assert!(
+                heard.recv_timeout(STILL_WAITING).is_err(),
+                "the waiter returned with calls in flight"
+            );
+        }
+        let last = thread::spawn(move || drop(guards.next()));
+        heard
+            .recv_timeout(RELEASED)
+            .expect("the last call's finish did not release the waiter");
+        last.join().unwrap();
+        assert_eq!(in_flight(&calls), 0);
+    }
+
+    #[test]
+    fn a_call_registered_after_close_is_not_counted() {
+        let calls = Arc::new(Calls::default());
+        calls.close();
+        let guard = calls.register();
+        assert!(!guard.is_registered());
+        assert_eq!(in_flight(&calls), 0);
+
+        let heard = waiter(&calls);
+        heard
+            .recv_timeout(RELEASED)
+            .expect("the waiter waited on a call issued after close");
+        drop(guard);
+        assert_eq!(in_flight(&calls), 0);
+    }
+
+    #[test]
+    fn a_second_wait_after_the_calls_finish_returns_at_once() {
+        let calls = Arc::new(Calls::default());
+        drop(calls.register());
+        calls.close();
+        calls.wait_idle();
+        waiter(&calls)
+            .recv_timeout(RELEASED)
+            .expect("a second wait blocked");
     }
 }
