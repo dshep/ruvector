@@ -228,17 +228,25 @@ pub struct VectorDB {
     calls: Arc<Calls>,
 }
 
-/// Run `f` against the open database, or fail when `close()` has released it.
+/// Run `f` against the open database, or fail as closed: `inner` is `None`
+/// for a call issued after `close()`, and holds `None` once `close()` has
+/// released the database.
 fn with_open<T>(
-    inner: &RwLock<Option<CoreVectorDB>>,
+    inner: Option<&RwLock<Option<CoreVectorDB>>>,
     f: impl FnOnce(&CoreVectorDB) -> ruvector_core::Result<T>,
 ) -> ruvector_core::Result<T> {
+    let closed = || {
+        Err(RuvectorError::StorageError(
+            "the database is closed".to_string(),
+        ))
+    };
+    let Some(inner) = inner else {
+        return closed();
+    };
     let guard = inner.read().expect("RwLock poisoned");
     match guard.as_ref() {
         Some(db) => f(db),
-        None => Err(RuvectorError::StorageError(
-            "the database is closed".to_string(),
-        )),
+        None => closed(),
     }
 }
 
@@ -278,13 +286,26 @@ impl Calls {
         CallGuard(Some(Arc::clone(self)))
     }
 
-    /// Refuse new calls, then wait until every registered call has finished.
-    fn close_and_wait(&self) {
+    /// Refuse every call registered from now on.
+    fn close(&self) {
+        self.lock().closed = true;
+    }
+
+    /// Wait until every call registered before `close()` has finished.
+    fn wait_idle(&self) {
         let mut state = self.lock();
-        state.closed = true;
         while state.in_flight > 0 {
-            state = self.idle.wait(state).unwrap_or_else(PoisonError::into_inner);
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
+    }
+}
+
+impl CallGuard {
+    fn is_registered(&self) -> bool {
+        self.0.is_some()
     }
 }
 
@@ -310,14 +331,15 @@ impl VectorDB {
 
     /// Register a call now and return the promise of its result.
     ///
-    /// `work` runs on the blocking pool and releases the registration when it
-    /// returns, off the JS thread, so a `close()` waiting on the JS thread
-    /// never blocks the call it waits for. `resolve` builds the JS value on
-    /// the JS thread.
+    /// `work` runs on the blocking pool, converts its arguments there, and
+    /// releases the registration when it returns. A call issued after
+    /// `close()` gets no database, so it fails as closed even when it runs
+    /// before `close()` has dropped the engine. `resolve` builds the JS value
+    /// on the JS thread.
     fn call<T, V>(
         &self,
         env: Env,
-        work: impl FnOnce(&RwLock<Option<CoreVectorDB>>) -> Result<T> + Send + 'static,
+        work: impl FnOnce(Option<&RwLock<Option<CoreVectorDB>>>) -> Result<T> + Send + 'static,
         resolve: impl FnOnce(T) -> Result<V> + 'static,
     ) -> Result<JsObject>
     where
@@ -325,11 +347,13 @@ impl VectorDB {
         V: ToNapiValue + 'static,
     {
         let registration = self.calls.register();
-        let db = Arc::clone(&self.inner);
+        let db = registration
+            .is_registered()
+            .then(|| Arc::clone(&self.inner));
         env.execute_tokio_future(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let result = work(&db);
+                    let result = work(db.as_deref());
                     drop(registration);
                     result
                 })
@@ -394,12 +418,10 @@ impl VectorDB {
     /// ```
     #[napi(ts_return_type = "Promise<string>")]
     pub fn insert(&self, env: Env, entry: JsVectorEntry) -> Result<JsObject> {
-        let core_entry = entry.to_core();
-
         self.call(
             env,
             move |db| {
-                let core_entry = core_entry?;
+                let core_entry = entry.to_core()?;
                 with_open(db, |db| db.insert(core_entry))
                     .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
             },
@@ -420,12 +442,13 @@ impl VectorDB {
     /// ```
     #[napi(ts_return_type = "Promise<Array<string>>")]
     pub fn insert_batch(&self, env: Env, entries: Vec<JsVectorEntry>) -> Result<JsObject> {
-        let core_entries: Result<Vec<VectorEntry>> = entries.iter().map(|e| e.to_core()).collect();
-
         self.call(
             env,
             move |db| {
-                let core_entries = core_entries?;
+                let core_entries: Vec<VectorEntry> = entries
+                    .iter()
+                    .map(JsVectorEntry::to_core)
+                    .collect::<Result<_>>()?;
                 with_open(db, |db| db.insert_batch(core_entries))
                     .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
             },
@@ -447,12 +470,10 @@ impl VectorDB {
     /// ```
     #[napi(ts_return_type = "Promise<Array<JsSearchResult>>")]
     pub fn search(&self, env: Env, query: JsSearchQuery) -> Result<JsObject> {
-        let core_query = query.to_core();
-
         self.call(
             env,
             move |db| {
-                let core_query = core_query?;
+                let core_query = query.to_core()?;
                 with_open(db, |db| db.search(core_query))
                     .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
             },
@@ -560,21 +581,38 @@ impl VectorDB {
 
     /// Close the database and release its storage file
     ///
-    /// The store's file lock is released when the last handle on that file in
-    /// this process closes. Calls issued on this handle before `close()`
-    /// finish normally first; any call issued after `close()` rejects with
-    /// "the database is closed". Calling it again does nothing.
+    /// Any call issued after `close()` rejects with "the database is closed";
+    /// calls issued before it finish normally. The returned promise resolves
+    /// once those calls have finished and the database is released, without
+    /// blocking the JS thread meanwhile; it waits as long as they take. The
+    /// store's file lock is released when the last handle on that file in
+    /// this process closes. Calling it again returns a promise that resolves
+    /// no earlier than the first.
     ///
     /// # Example
     /// ```javascript
-    /// db.close();
+    /// await db.close();
     /// const reopened = new VectorDB({ dimensions: 384, storagePath: './vectors.db' });
     /// ```
-    #[napi]
-    pub fn close(&self) {
-        self.calls.close_and_wait();
-        let released = self.inner.write().expect("RwLock poisoned").take();
-        drop(released);
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn close(&self, env: Env) -> Result<JsObject> {
+        self.calls.close();
+        let calls = Arc::clone(&self.calls);
+        let db = Arc::clone(&self.inner);
+        env.execute_tokio_future(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    calls.wait_idle();
+                    // Dropped while the lock is held, so a second close(),
+                    // which takes the lock too, resolves no earlier than this.
+                    let mut slot = db.write().unwrap_or_else(PoisonError::into_inner);
+                    drop(slot.take());
+                })
+                .await
+                .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))
+            },
+            |_env, ()| Ok(()),
+        )
     }
 }
 
@@ -908,5 +946,102 @@ pub fn get_health() -> JsHealthResponse {
         },
         version: health.version,
         uptime_seconds: health.uptime_seconds as i64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallGuard, Calls};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    const STILL_WAITING: Duration = Duration::from_millis(100);
+    const RELEASED: Duration = Duration::from_secs(5);
+
+    fn in_flight(calls: &Calls) -> usize {
+        calls.lock().in_flight
+    }
+
+    /// Start `wait_idle` on another thread; the receiver hears when it returns.
+    fn waiter(calls: &Arc<Calls>) -> mpsc::Receiver<()> {
+        let (done, heard) = mpsc::channel();
+        let calls = Arc::clone(calls);
+        thread::spawn(move || {
+            calls.wait_idle();
+            done.send(()).unwrap();
+        });
+        heard
+    }
+
+    #[test]
+    fn a_call_registered_before_close_holds_the_waiter_until_it_finishes() {
+        let calls = Arc::new(Calls::default());
+        let guard = calls.register();
+        assert!(guard.is_registered());
+        calls.close();
+
+        let heard = waiter(&calls);
+        assert!(
+            heard.recv_timeout(STILL_WAITING).is_err(),
+            "the waiter returned with a call in flight"
+        );
+
+        drop(guard);
+        heard
+            .recv_timeout(RELEASED)
+            .expect("the waiter was not released when the call finished");
+        assert_eq!(in_flight(&calls), 0);
+    }
+
+    #[test]
+    fn the_waiter_is_released_only_by_the_last_call() {
+        let calls = Arc::new(Calls::default());
+        let guards: Vec<CallGuard> = (0..3).map(|_| calls.register()).collect();
+        assert_eq!(in_flight(&calls), 3);
+        calls.close();
+
+        let heard = waiter(&calls);
+        let mut guards = guards.into_iter();
+        for _ in 0..2 {
+            drop(guards.next());
+            assert!(
+                heard.recv_timeout(STILL_WAITING).is_err(),
+                "the waiter returned with calls in flight"
+            );
+        }
+        let last = thread::spawn(move || drop(guards.next()));
+        heard
+            .recv_timeout(RELEASED)
+            .expect("the last call's finish did not release the waiter");
+        last.join().unwrap();
+        assert_eq!(in_flight(&calls), 0);
+    }
+
+    #[test]
+    fn a_call_registered_after_close_is_not_counted() {
+        let calls = Arc::new(Calls::default());
+        calls.close();
+        let guard = calls.register();
+        assert!(!guard.is_registered());
+        assert_eq!(in_flight(&calls), 0);
+
+        let heard = waiter(&calls);
+        heard
+            .recv_timeout(RELEASED)
+            .expect("the waiter waited on a call issued after close");
+        drop(guard);
+        assert_eq!(in_flight(&calls), 0);
+    }
+
+    #[test]
+    fn a_second_wait_after_the_calls_finish_returns_at_once() {
+        let calls = Arc::new(Calls::default());
+        drop(calls.register());
+        calls.close();
+        calls.wait_idle();
+        waiter(&calls)
+            .recv_timeout(RELEASED)
+            .expect("a second wait blocked");
     }
 }

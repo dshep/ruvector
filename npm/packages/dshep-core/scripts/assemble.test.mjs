@@ -8,19 +8,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import platforms from '../platforms.cjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, 'assemble.mjs');
 const upstream = JSON.parse(readFileSync(join(here, '..', '..', 'core', 'package.json'), 'utf8')).version;
 
-// Stated here rather than imported: importing assemble.mjs runs it.
-const EXPECTED = {
-  'linux-x64-gnu': { os: ['linux'], cpu: ['x64'], libc: ['glibc'] },
-  'linux-arm64-gnu': { os: ['linux'], cpu: ['arm64'], libc: ['glibc'] },
-  'darwin-x64': { os: ['darwin'], cpu: ['x64'] },
-  'darwin-arm64': { os: ['darwin'], cpu: ['arm64'] },
-  'win32-x64-msvc': { os: ['win32'], cpu: ['x64'] },
-};
+const { packageName } = platforms;
+const EXPECTED = platforms.PLATFORMS;
 const PLATFORMS = Object.keys(EXPECTED);
 
 function workspace(t, platforms = PLATFORMS) {
@@ -89,7 +84,7 @@ test('a complete set produces the main package and five platform packages', (t) 
   for (const [platform, constraints] of Object.entries(EXPECTED)) {
     const dir = join(dirs.out, platform);
     const pkg = readJson(join(dir, 'package.json'));
-    assert.equal(pkg.name, `@dshep/ruvector-core-${platform}`);
+    assert.equal(pkg.name, packageName(platform));
     assert.equal(pkg.version, version);
     assert.equal(pkg.main, 'ruvector.node');
     assert.deepEqual(pkg.files, ['ruvector.node']);
@@ -105,7 +100,7 @@ test('a complete set produces the main package and five platform packages', (t) 
   assert.equal(main.version, version);
   assert.deepEqual(
     main.optionalDependencies,
-    Object.fromEntries(PLATFORMS.map((p) => [`@dshep/ruvector-core-${p}`, version]))
+    Object.fromEntries(PLATFORMS.map((p) => [packageName(p), version]))
   );
   for (const file of main.files) assert.ok(existsSync(join(dirs.out, 'main', file)), `main package lacks ${file}`);
 });

@@ -12,18 +12,13 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import platforms from '../platforms.cjs';
+
+const { PLATFORMS, packageName } = platforms;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgDir = join(here, '..');
 const upstreamPkg = join(pkgDir, '..', 'core', 'package.json');
-
-export const PLATFORMS = {
-  'linux-x64-gnu': { os: ['linux'], cpu: ['x64'], libc: ['glibc'] },
-  'linux-arm64-gnu': { os: ['linux'], cpu: ['arm64'], libc: ['glibc'] },
-  'darwin-x64': { os: ['darwin'], cpu: ['x64'] },
-  'darwin-arm64': { os: ['darwin'], cpu: ['arm64'] },
-  'win32-x64-msvc': { os: ['win32'], cpu: ['x64'] },
-};
 
 function fail(message) {
   console.error(`assemble: ${message}`);
@@ -48,7 +43,7 @@ const base = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
 const optionalDependencies = {};
 
 for (const [platform, constraints] of Object.entries(PLATFORMS)) {
-  const name = `@dshep/ruvector-core-${platform}`;
+  const name = packageName(platform);
   const dir = join(outDir, platform);
   mkdirSync(dir, { recursive: true });
   copyFileSync(join(artifactsDir, `bindings-${platform}`, 'ruvector.node'), join(dir, 'ruvector.node'));

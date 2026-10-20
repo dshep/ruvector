@@ -138,8 +138,8 @@ jobs:
         with:
           path: artifacts
 
-      - name: Test the assembler
-        run: node --test npm/packages/dshep-core/scripts/assemble.test.mjs
+      - name: Test the assembler and the platform table
+        run: node --test npm/packages/dshep-core/scripts/assemble.test.mjs npm/packages/dshep-core/scripts/platforms.test.mjs
 
       - name: Assemble packages
         shell: bash
@@ -162,9 +162,32 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
+        # A package already on the registry at this exact version is skipped,
+        # so a run that failed part-way can be re-run to finish the set. A
+        # lookup that fails for any reason other than "not found" stops the job.
         run: |
+          publish() {
+            local dir="$1" name version found rc
+            name="$(node -p "require('./${dir}package.json').name")"
+            version="$(node -p "require('./${dir}package.json').version")"
+            if npm view "$name@$version" version >view.out 2>view.err; then rc=0; else rc=$?; fi
+            found="$(cat view.out)"
+            if [ "$rc" -eq 0 ] && [ "$found" = "$version" ]; then
+              echo "skip $name@$version: already published"
+              return 0
+            elif [ "$rc" -eq 0 ] && [ -z "$found" ]; then
+              echo "$name exists without $version: publishing"
+            elif [ "$rc" -ne 0 ] && grep -q 'E404' view.err; then
+              echo "$name is not on the registry: publishing"
+            else
+              echo "cannot tell whether $name@$version is published (npm view exit $rc):"
+              cat view.out view.err
+              return 1
+            fi
+            (cd "$dir" && npm publish --tag latest)
+          }
           for dir in dist/*/; do
             [ "$dir" = "dist/main/" ] && continue
-            (cd "$dir" && npm publish --tag latest)
+            publish "$dir"
           done
-          (cd dist/main && npm publish --tag latest)
+          publish dist/main/

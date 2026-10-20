@@ -1,7 +1,11 @@
 export interface VectorEntry {
   id?: string;
   vector: Float32Array | number[];
-  /** JSON text; the engine stores and returns it as text. */
+  /**
+   * JSON text of an object. The engine parses it and returns it re-serialized,
+   * so whitespace and key order may differ. Text that is not a JSON object is
+   * dropped without an error: the entry is stored with no metadata.
+   */
   metadata?: string;
 }
 
@@ -9,7 +13,10 @@ export interface SearchQuery {
   vector: Float32Array | number[];
   k: number;
   efSearch?: number;
-  /** JSON text naming the metadata fields to match. */
+  /**
+   * JSON text of an object naming the metadata fields to match. Text that is
+   * not a JSON object is ignored without an error: the search runs unfiltered.
+   */
   filter?: string;
 }
 
@@ -36,8 +43,14 @@ export class VectorDb {
   get(id: string): Promise<VectorEntry | null>;
   len(): Promise<number>;
   isEmpty(): Promise<boolean>;
-  /** Release the database and its file lock once calls issued before it finish; later calls fail. A second call does nothing. */
-  close(): void;
+  /**
+   * Release the database and its file lock. Calls issued before close() finish
+   * normally; calls issued after it reject with "the database is closed". The
+   * promise resolves once the earlier calls have finished and the file is
+   * released, without blocking the JS thread; it waits as long as they take.
+   * A second call resolves no earlier than the first.
+   */
+  close(): Promise<void>;
 }
 
 /** The engine crate's version, not this package's. */

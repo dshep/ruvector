@@ -1,22 +1,16 @@
 // Loads the prebuilt engine for this platform. Each platform's binary is its
 // own package, listed as an optional dependency, so npm installs only the one
 // this machine needs.
-const { platform, arch } = process;
+const { packageFor } = require('./platforms.cjs');
 
-const platformPackages = {
-  linux: { x64: '@dshep/ruvector-core-linux-x64-gnu', arm64: '@dshep/ruvector-core-linux-arm64-gnu' },
-  darwin: { x64: '@dshep/ruvector-core-darwin-x64', arm64: '@dshep/ruvector-core-darwin-arm64' },
-  win32: { x64: '@dshep/ruvector-core-win32-x64-msvc' },
-};
+// Node reports a glibc version only when the process runs on glibc.
+function runsOnGlibc() {
+  if (process.platform !== 'linux') return false;
+  return Boolean(process.report.getReport().header.glibcVersionRuntime);
+}
 
 function loadNativeModule() {
-  const packageName = platformPackages[platform] && platformPackages[platform][arch];
-  if (!packageName) {
-    throw new Error(
-      `@dshep/ruvector-core has no prebuilt engine for ${platform}-${arch}. ` +
-        'Built platforms: Linux x64 and arm64 (glibc), macOS x64 and arm64, Windows x64.'
-    );
-  }
+  const packageName = packageFor({ platform: process.platform, arch: process.arch, glibc: runsOnGlibc() });
   try {
     return require(packageName);
   } catch (error) {
