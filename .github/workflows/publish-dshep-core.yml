@@ -1,7 +1,7 @@
 name: Publish @dshep/ruvector-core
 
-# Builds the Node engine for all five platforms, checks on every platform the
-# runner can execute that a closed store's file opens again, and publishes
+# Builds the Node engine for all five platforms, checks on every platform that
+# a closed store's file opens again, and publishes
 # @dshep/ruvector-core plus its five @dshep/ruvector-core-<platform> packages to
 # GitHub Packages. Builds the engine of the commit it runs on, never the
 # default branch's.
@@ -37,23 +37,21 @@ jobs:
           - host: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x64-gnu
-            check: true
-          - host: ubuntu-22.04
+          # Built natively so the check below can load the binary; 22.04 keeps
+          # the glibc floor the same as the linux-x64 build.
+          - host: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-arm64-gnu
-            check: false
+          # Built on Apple Silicon; checked with an x64 Node under Rosetta.
           - host: macos-14
             target: x86_64-apple-darwin
             platform: darwin-x64
-            check: false
           - host: macos-14
             target: aarch64-apple-darwin
             platform: darwin-arm64
-            check: true
           - host: windows-2022
             target: x86_64-pc-windows-msvc
             platform: win32-x64-msvc
-            check: true
 
     name: Build ${{ matrix.settings.platform }}
     runs-on: ${{ matrix.settings.host }}
@@ -77,12 +75,6 @@ jobs:
         with:
           key: dshep-core-${{ matrix.settings.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.settings.platform == 'linux-arm64-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
       - name: Install NAPI-RS CLI
         run: npm install -g @napi-rs/cli@^2.18.0
 
@@ -91,7 +83,6 @@ jobs:
         shell: bash
         run: npm run build:napi -- --target ${{ matrix.settings.target }}
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           # A stripped macOS build was refused by a newer macOS loader
           # ("mis-aligned LINKEDIT string pool"); the unstripped one loads.
           CARGO_PROFILE_RELEASE_STRIP: ${{ startsWith(matrix.settings.platform, 'darwin') && 'false' || 'true' }}
@@ -104,10 +95,18 @@ jobs:
           mkdir -p out
           cp "$SRC" out/ruvector.node
 
+      - name: Setup x64 Node.js (darwin-x64)
+        if: matrix.settings.platform == 'darwin-x64'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20'
+          architecture: x64
+
       - name: Check close releases the file
-        if: matrix.settings.check
         shell: bash
-        run: node npm/packages/dshep-core/scripts/close-reopen-check.cjs out/ruvector.node
+        run: |
+          echo "checking with node on $(node -p 'process.platform + "-" + process.arch')"
+          node npm/packages/dshep-core/scripts/close-reopen-check.cjs out/ruvector.node
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -139,6 +138,9 @@ jobs:
         with:
           path: artifacts
 
+      - name: Test the assembler
+        run: node --test npm/packages/dshep-core/scripts/assemble.test.mjs
+
       - name: Assemble packages
         shell: bash
         run: |
@@ -159,8 +161,10 @@ jobs:
         if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
-            (cd "dist/$platform" && npm publish --tag latest)
+          for dir in dist/*/; do
+            [ "$dir" = "dist/main/" ] && continue
+            (cd "$dir" && npm publish --tag latest)
           done
           (cd dist/main && npm publish --tag latest)

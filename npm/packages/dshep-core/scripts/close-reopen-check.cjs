@@ -3,8 +3,10 @@
 //
 // Usage: node close-reopen-check.cjs <path-to-engine.node>
 //
-// Opens a store, writes a vector, closes it, checks a call after close fails,
-// then opens the same file from a child process. Exits non-zero on any failure.
+// Opens a store, writes a vector, issues more writes without awaiting them and
+// closes at once: every write issued before close() must complete. Then checks
+// a call after close fails, and opens the same file from a child process, which
+// must read every vector. Exits non-zero on any failure.
 const { execFileSync } = require('node:child_process');
 const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
@@ -18,21 +20,34 @@ if (!enginePath) {
 
 const dir = mkdtempSync(join(tmpdir(), 'ruvector-close-'));
 const storagePath = join(dir, 'store.vectors');
+const PENDING = 50;
 
 async function main() {
   const { VectorDb } = require(enginePath);
   const db = new VectorDb({ dimensions: 3, storagePath });
   await db.insert({ id: 'a', vector: new Float32Array([1, 0, 0]), metadata: '{"k":"v"}' });
+  const pending = [];
+  for (let i = 0; i < PENDING; i++) {
+    pending.push(db.insert({ id: `p${i}`, vector: new Float32Array([0, 1, i]) }));
+  }
   db.close();
   db.close();
+
+  const settled = await Promise.allSettled(pending);
+  const rejected = settled.filter((s) => s.status === 'rejected');
+  if (rejected.length > 0) {
+    throw new Error(
+      `${rejected.length} of ${PENDING} inserts issued before close() failed: ${rejected[0].reason.message}`,
+    );
+  }
 
   let failedAfterClose = false;
   try {
     await db.len();
   } catch (error) {
-    failedAfterClose = /closed/.test(String(error.message));
+    failedAfterClose = /the database is closed/.test(String(error.message));
   }
-  if (!failedAfterClose) throw new Error('a call after close() did not fail with "closed"');
+  if (!failedAfterClose) throw new Error('a call after close() did not fail with "the database is closed"');
 
   const child = `
     const { VectorDb } = require(${JSON.stringify(enginePath)});
@@ -41,7 +56,8 @@ async function main() {
       .catch((e) => { process.stderr.write(e.message); process.exit(1); });
   `;
   const count = execFileSync(process.execPath, ['-e', child]).toString().trim();
-  if (count !== '1') throw new Error(`the child process read ${count} vectors, expected 1`);
+  const expected = String(1 + PENDING);
+  if (count !== expected) throw new Error(`the child process read ${count} vectors, expected ${expected}`);
   console.log(`close-reopen-check: ok — ${enginePath}`);
 }
 

@@ -26,7 +26,9 @@ export class VectorDb {
     storagePath?: string;
     distanceMetric?: string;
     hnswConfig?: unknown;
+    quantization?: unknown;
   });
+  static withDimensions(dimensions: number): VectorDb;
   insert(entry: VectorEntry): Promise<string>;
   insertBatch(entries: VectorEntry[]): Promise<string[]>;
   search(query: SearchQuery): Promise<SearchResult[]>;
@@ -34,7 +36,7 @@ export class VectorDb {
   get(id: string): Promise<VectorEntry | null>;
   len(): Promise<number>;
   isEmpty(): Promise<boolean>;
-  /** Release the database and its file lock; later calls fail. A second call does nothing. */
+  /** Release the database and its file lock once calls issued before it finish; later calls fail. A second call does nothing. */
   close(): void;
 }
 

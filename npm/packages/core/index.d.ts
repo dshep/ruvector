@@ -23,8 +23,6 @@ export class VectorDb {
   get(id: string): Promise<VectorEntry | null>;
   len(): Promise<number>;
   isEmpty(): Promise<boolean>;
-  /** Release the database; later calls fail. A second call does nothing. */
-  close(): void;
 }
 
 // Alias for backwards compatibility

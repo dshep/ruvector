@@ -7,14 +7,14 @@
 #![warn(clippy::pedantic)]
 
 use napi::bindgen_prelude::*;
+use napi::JsObject;
 use napi_derive::napi;
 use ruvector_core::{
     types::{DbOptions, HnswConfig, QuantizationConfig},
     DistanceMetric, RuvectorError, SearchQuery, SearchResult, VectorDB as CoreVectorDB,
     VectorEntry,
 };
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Import new crates
@@ -224,6 +224,8 @@ impl From<SearchResult> for JsSearchResult {
 pub struct VectorDB {
     /// `None` once `close()` has released the database.
     inner: Arc<RwLock<Option<CoreVectorDB>>>,
+    /// The calls issued on this handle that have not finished yet.
+    calls: Arc<Calls>,
 }
 
 /// Run `f` against the open database, or fail when `close()` has released it.
@@ -237,6 +239,105 @@ fn with_open<T>(
         None => Err(RuvectorError::StorageError(
             "the database is closed".to_string(),
         )),
+    }
+}
+
+#[derive(Default)]
+struct CallState {
+    in_flight: usize,
+    closed: bool,
+}
+
+/// Counts the calls issued on one handle, so `close()` can wait for them.
+///
+/// A call registers synchronously at the JS call site, before its promise is
+/// returned: the work itself starts later on another thread, so registering
+/// there would let a `close()` issued after the call overtake it.
+#[derive(Default)]
+struct Calls {
+    state: Mutex<CallState>,
+    idle: Condvar,
+}
+
+/// Keeps `close()` waiting until the call holding it has finished its work.
+/// Empty for a call issued after `close()`, which then fails as closed.
+struct CallGuard(Option<Arc<Calls>>);
+
+impl Calls {
+    // A poisoned lock only means a panic elsewhere; the counter stays valid.
+    fn lock(&self) -> MutexGuard<'_, CallState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn register(self: &Arc<Self>) -> CallGuard {
+        let mut state = self.lock();
+        if state.closed {
+            return CallGuard(None);
+        }
+        state.in_flight += 1;
+        CallGuard(Some(Arc::clone(self)))
+    }
+
+    /// Refuse new calls, then wait until every registered call has finished.
+    fn close_and_wait(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        while state.in_flight > 0 {
+            state = self.idle.wait(state).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if let Some(calls) = self.0.take() {
+            let mut state = calls.lock();
+            state.in_flight -= 1;
+            if state.in_flight == 0 {
+                calls.idle.notify_all();
+            }
+        }
+    }
+}
+
+impl VectorDB {
+    fn open(db: CoreVectorDB) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(db))),
+            calls: Arc::new(Calls::default()),
+        }
+    }
+
+    /// Register a call now and return the promise of its result.
+    ///
+    /// `work` runs on the blocking pool and releases the registration when it
+    /// returns, off the JS thread, so a `close()` waiting on the JS thread
+    /// never blocks the call it waits for. `resolve` builds the JS value on
+    /// the JS thread.
+    fn call<T, V>(
+        &self,
+        env: Env,
+        work: impl FnOnce(&RwLock<Option<CoreVectorDB>>) -> Result<T> + Send + 'static,
+        resolve: impl FnOnce(T) -> Result<V> + 'static,
+    ) -> Result<JsObject>
+    where
+        T: Send + 'static,
+        V: ToNapiValue + 'static,
+    {
+        let registration = self.calls.register();
+        let db = Arc::clone(&self.inner);
+        env.execute_tokio_future(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let result = work(&db);
+                    drop(registration);
+                    result
+                })
+                .await
+                .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            },
+            move |_env, value| resolve(value),
+        )
     }
 }
 
@@ -263,9 +364,7 @@ impl VectorDB {
         let db = CoreVectorDB::new(core_options)
             .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
-        Ok(Self {
-            inner: Arc::new(RwLock::new(Some(db))),
-        })
+        Ok(Self::open(db))
     }
 
     /// Create a vector database with default options
@@ -279,9 +378,7 @@ impl VectorDB {
         let db = CoreVectorDB::with_dimensions(dimensions as usize)
             .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
-        Ok(Self {
-            inner: Arc::new(RwLock::new(Some(db))),
-        })
+        Ok(Self::open(db))
     }
 
     /// Insert a vector entry into the database
@@ -295,15 +392,19 @@ impl VectorDB {
     ///   metadata: { text: 'example' }
     /// });
     /// ```
-    #[napi]
-    pub async fn insert(&self, entry: JsVectorEntry) -> Result<String> {
-        let core_entry = entry.to_core()?;
-        let db = self.inner.clone();
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn insert(&self, env: Env, entry: JsVectorEntry) -> Result<JsObject> {
+        let core_entry = entry.to_core();
 
-        tokio::task::spawn_blocking(move || with_open(&db, |db| db.insert(core_entry)))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
+        self.call(
+            env,
+            move |db| {
+                let core_entry = core_entry?;
+                with_open(db, |db| db.insert(core_entry))
+                    .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Insert multiple vectors in a batch
@@ -317,16 +418,19 @@ impl VectorDB {
     ///   { vector: new Float32Array([4, 5, 6]) }
     /// ]);
     /// ```
-    #[napi]
-    pub async fn insert_batch(&self, entries: Vec<JsVectorEntry>) -> Result<Vec<String>> {
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn insert_batch(&self, env: Env, entries: Vec<JsVectorEntry>) -> Result<JsObject> {
         let core_entries: Result<Vec<VectorEntry>> = entries.iter().map(|e| e.to_core()).collect();
-        let core_entries = core_entries?;
-        let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || with_open(&db, |db| db.insert_batch(core_entries)))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
+        self.call(
+            env,
+            move |db| {
+                let core_entries = core_entries?;
+                with_open(db, |db| db.insert_batch(core_entries))
+                    .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Search for similar vectors
@@ -341,16 +445,24 @@ impl VectorDB {
     ///   filter: { category: 'example' }
     /// });
     /// ```
-    #[napi]
-    pub async fn search(&self, query: JsSearchQuery) -> Result<Vec<JsSearchResult>> {
-        let core_query = query.to_core()?;
-        let db = self.inner.clone();
+    #[napi(ts_return_type = "Promise<Array<JsSearchResult>>")]
+    pub fn search(&self, env: Env, query: JsSearchQuery) -> Result<JsObject> {
+        let core_query = query.to_core();
 
-        tokio::task::spawn_blocking(move || with_open(&db, |db| db.search(core_query)))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
-            .map(|results| results.into_iter().map(Into::into).collect())
+        self.call(
+            env,
+            move |db| {
+                let core_query = core_query?;
+                with_open(db, |db| db.search(core_query))
+                    .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
+            },
+            |results| {
+                Ok(results
+                    .into_iter()
+                    .map(JsSearchResult::from)
+                    .collect::<Vec<_>>())
+            },
+        )
     }
 
     /// Delete a vector by ID
@@ -361,14 +473,16 @@ impl VectorDB {
     /// ```javascript
     /// const deleted = await db.delete('vector-id');
     /// ```
-    #[napi]
-    pub async fn delete(&self, id: String) -> Result<bool> {
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || with_open(&db, |db| db.delete(&id)))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("Delete failed: {}", e)))
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn delete(&self, env: Env, id: String) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.delete(&id))
+                    .map_err(|e| Error::from_reason(format!("Delete failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Get a vector by ID
@@ -382,25 +496,27 @@ impl VectorDB {
     ///   console.log('Found:', entry.metadata);
     /// }
     /// ```
-    #[napi]
-    pub async fn get(&self, id: String) -> Result<Option<JsVectorEntry>> {
-        let db = self.inner.clone();
+    #[napi(ts_return_type = "Promise<JsVectorEntry | null>")]
+    pub fn get(&self, env: Env, id: String) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.get(&id))
+                    .map_err(|e| Error::from_reason(format!("Get failed: {}", e)))
+            },
+            |result| {
+                Ok(result.map(|entry| {
+                    // Convert HashMap to JSON string
+                    let metadata = entry.metadata.and_then(|m| serde_json::to_string(&m).ok());
 
-        let result = tokio::task::spawn_blocking(move || with_open(&db, |db| db.get(&id)))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("Get failed: {}", e)))?;
-
-        Ok(result.map(|entry| {
-            // Convert HashMap to JSON string
-            let metadata = entry.metadata.and_then(|m| serde_json::to_string(&m).ok());
-
-            JsVectorEntry {
-                id: entry.id,
-                vector: Float32Array::new(entry.vector),
-                metadata,
-            }
-        }))
+                    JsVectorEntry {
+                        id: entry.id,
+                        vector: Float32Array::new(entry.vector),
+                        metadata,
+                    }
+                }))
+            },
+        )
     }
 
     /// Get the number of vectors in the database
@@ -410,15 +526,16 @@ impl VectorDB {
     /// const count = await db.len();
     /// console.log(`Database contains ${count} vectors`);
     /// ```
-    #[napi]
-    pub async fn len(&self) -> Result<u32> {
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || with_open(&db, |db| db.len()))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("Len failed: {}", e)))
-            .map(|len| len as u32)
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn len(&self, env: Env) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.len())
+                    .map_err(|e| Error::from_reason(format!("Len failed: {}", e)))
+            },
+            |len| Ok(len as u32),
+        )
     }
 
     /// Check if the database is empty
@@ -429,22 +546,24 @@ impl VectorDB {
     ///   console.log('Database is empty');
     /// }
     /// ```
-    #[napi]
-    pub async fn is_empty(&self) -> Result<bool> {
-        let db = self.inner.clone();
-
-        tokio::task::spawn_blocking(move || with_open(&db, |db| db.is_empty()))
-            .await
-            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-            .map_err(|e| Error::from_reason(format!("IsEmpty failed: {}", e)))
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn is_empty(&self, env: Env) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.is_empty())
+                    .map_err(|e| Error::from_reason(format!("IsEmpty failed: {}", e)))
+            },
+            Ok,
+        )
     }
 
     /// Close the database and release its storage file
     ///
     /// The store's file lock is released when the last handle on that file in
-    /// this process closes. Waits for calls already running on this handle to
-    /// finish; any call made after `close()` fails. Calling it again does
-    /// nothing.
+    /// this process closes. Calls issued on this handle before `close()`
+    /// finish normally first; any call issued after `close()` rejects with
+    /// "the database is closed". Calling it again does nothing.
     ///
     /// # Example
     /// ```javascript
@@ -453,6 +572,7 @@ impl VectorDB {
     /// ```
     #[napi]
     pub fn close(&self) {
+        self.calls.close_and_wait();
         let released = self.inner.write().expect("RwLock poisoned").take();
         drop(released);
     }
