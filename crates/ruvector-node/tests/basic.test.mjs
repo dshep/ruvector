@@ -384,3 +384,20 @@ test('VectorDB - concurrent operations', async (t) => {
   t.is(results.length, 10);
   results.forEach((r) => t.truthy(r.length >= 1));
 });
+
+test('VectorDB - close releases the storage file', async (t) => {
+  const tempDir = createTempDir();
+  t.teardown(() => cleanupTempDir(tempDir));
+  const storagePath = join(tempDir, 'close.db');
+
+  const db = new VectorDB({ dimensions: 3, storagePath });
+  await db.insert({ id: 'a', vector: new Float32Array([1, 0, 0]) });
+  db.close();
+  db.close(); // a second close does nothing
+
+  await t.throwsAsync(() => db.len(), { message: /closed/ });
+
+  const reopened = new VectorDB({ dimensions: 3, storagePath });
+  t.is(await reopened.len(), 1);
+  reopened.close();
+});

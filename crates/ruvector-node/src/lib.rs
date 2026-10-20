@@ -10,7 +10,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use ruvector_core::{
     types::{DbOptions, HnswConfig, QuantizationConfig},
-    DistanceMetric, SearchQuery, SearchResult, VectorDB as CoreVectorDB, VectorEntry,
+    DistanceMetric, RuvectorError, SearchQuery, SearchResult, VectorDB as CoreVectorDB,
+    VectorEntry,
 };
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -221,7 +222,22 @@ impl From<SearchResult> for JsSearchResult {
 /// High-performance vector database with HNSW indexing
 #[napi]
 pub struct VectorDB {
-    inner: Arc<RwLock<CoreVectorDB>>,
+    /// `None` once `close()` has released the database.
+    inner: Arc<RwLock<Option<CoreVectorDB>>>,
+}
+
+/// Run `f` against the open database, or fail when `close()` has released it.
+fn with_open<T>(
+    inner: &RwLock<Option<CoreVectorDB>>,
+    f: impl FnOnce(&CoreVectorDB) -> ruvector_core::Result<T>,
+) -> ruvector_core::Result<T> {
+    let guard = inner.read().expect("RwLock poisoned");
+    match guard.as_ref() {
+        Some(db) => f(db),
+        None => Err(RuvectorError::StorageError(
+            "the database is closed".to_string(),
+        )),
+    }
 }
 
 #[napi]
@@ -248,7 +264,7 @@ impl VectorDB {
             .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: Arc::new(RwLock::new(Some(db))),
         })
     }
 
@@ -264,7 +280,7 @@ impl VectorDB {
             .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: Arc::new(RwLock::new(Some(db))),
         })
     }
 
@@ -284,13 +300,10 @@ impl VectorDB {
         let core_entry = entry.to_core()?;
         let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.insert(core_entry)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
+        tokio::task::spawn_blocking(move || with_open(&db, |db| db.insert(core_entry)))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("Insert failed: {}", e)))
     }
 
     /// Insert multiple vectors in a batch
@@ -310,13 +323,10 @@ impl VectorDB {
         let core_entries = core_entries?;
         let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.insert_batch(core_entries)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
+        tokio::task::spawn_blocking(move || with_open(&db, |db| db.insert_batch(core_entries)))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("Batch insert failed: {}", e)))
     }
 
     /// Search for similar vectors
@@ -336,14 +346,11 @@ impl VectorDB {
         let core_query = query.to_core()?;
         let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.search(core_query)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
-        .map(|results| results.into_iter().map(Into::into).collect())
+        tokio::task::spawn_blocking(move || with_open(&db, |db| db.search(core_query)))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
+            .map(|results| results.into_iter().map(Into::into).collect())
     }
 
     /// Delete a vector by ID
@@ -358,13 +365,10 @@ impl VectorDB {
     pub async fn delete(&self, id: String) -> Result<bool> {
         let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.delete(&id)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Delete failed: {}", e)))
+        tokio::task::spawn_blocking(move || with_open(&db, |db| db.delete(&id)))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("Delete failed: {}", e)))
     }
 
     /// Get a vector by ID
@@ -382,13 +386,10 @@ impl VectorDB {
     pub async fn get(&self, id: String) -> Result<Option<JsVectorEntry>> {
         let db = self.inner.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.get(&id)
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Get failed: {}", e)))?;
+        let result = tokio::task::spawn_blocking(move || with_open(&db, |db| db.get(&id)))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("Get failed: {}", e)))?;
 
         Ok(result.map(|entry| {
             // Convert HashMap to JSON string
@@ -413,14 +414,11 @@ impl VectorDB {
     pub async fn len(&self) -> Result<u32> {
         let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.len()
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("Len failed: {}", e)))
-        .map(|len| len as u32)
+        tokio::task::spawn_blocking(move || with_open(&db, |db| db.len()))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("Len failed: {}", e)))
+            .map(|len| len as u32)
     }
 
     /// Check if the database is empty
@@ -435,13 +433,28 @@ impl VectorDB {
     pub async fn is_empty(&self) -> Result<bool> {
         let db = self.inner.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let db = db.read().expect("RwLock poisoned");
-            db.is_empty()
-        })
-        .await
-        .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
-        .map_err(|e| Error::from_reason(format!("IsEmpty failed: {}", e)))
+        tokio::task::spawn_blocking(move || with_open(&db, |db| db.is_empty()))
+            .await
+            .map_err(|e| Error::from_reason(format!("Task failed: {}", e)))?
+            .map_err(|e| Error::from_reason(format!("IsEmpty failed: {}", e)))
+    }
+
+    /// Close the database and release its storage file
+    ///
+    /// The store's file lock is released when the last handle on that file in
+    /// this process closes. Waits for calls already running on this handle to
+    /// finish; any call made after `close()` fails. Calling it again does
+    /// nothing.
+    ///
+    /// # Example
+    /// ```javascript
+    /// db.close();
+    /// const reopened = new VectorDB({ dimensions: 384, storagePath: './vectors.db' });
+    /// ```
+    #[napi]
+    pub fn close(&self) {
+        let released = self.inner.write().expect("RwLock poisoned").take();
+        drop(released);
     }
 }
 
