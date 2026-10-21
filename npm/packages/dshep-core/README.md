@@ -3,7 +3,9 @@
 RuVector's vector engine for Node, built from [dshep/ruvector](https://github.com/dshep/ruvector)
 for [LedgerDB](https://github.com/dshep/ledgerdb). It is the upstream engine plus a
 `VectorDb.close()` whose promise resolves once the database and its file lock are
-released, so a closed store can be opened again by this process or another one.
+released, so a closed store can be opened again by this process or another one,
+and a `readOnly` open option that never writes the store's file and lets several
+read-only opens share it (see `index.d.ts`).
 
 Versions are the upstream `@ruvector/core` version plus a counter, for example
 `0.1.30-ledgerdb.1`. Each platform's binary is its own package,

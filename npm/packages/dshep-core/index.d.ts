@@ -34,6 +34,17 @@ export class VectorDb {
     distanceMetric?: string;
     hnswConfig?: unknown;
     quantization?: unknown;
+    /**
+     * Open an existing store read-only. Nothing reaches its file: search, get,
+     * len and isEmpty work as usual, and insert, insertBatch and delete reject
+     * with "the database is open read-only". A missing file is refused with an
+     * error naming it. Takes a shared lock: read-only opens from other
+     * processes coexist, a writer is refused while one holds the file and a
+     * reader while a writer holds it, each with "Database already open. Cannot
+     * acquire lock." In one process, a read-only open of a store held writable
+     * shares it, and a writable open of a store held read-only is refused.
+     */
+    readOnly?: boolean;
   });
   static withDimensions(dimensions: number): VectorDb;
   insert(entry: VectorEntry): Promise<string>;
