@@ -2,8 +2,7 @@
 name = "ruvector-core"
 version.workspace = true
 edition.workspace = true
-# File::try_lock_shared, for the read-only open
-rust-version = "1.89"
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

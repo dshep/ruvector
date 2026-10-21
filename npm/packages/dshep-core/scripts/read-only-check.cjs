@@ -10,7 +10,8 @@
 // reader opens while this process holds a reader, a writer is refused while
 // this process holds a reader, and a reader is refused while this process holds
 // a writer, each refusal with the lock message LedgerDB recognises. A read-only
-// open of a missing file is refused naming it, and creates nothing.
+// open of a missing file is refused with "no vector store at" and its path,
+// and creates nothing.
 // Exits non-zero on any failure.
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
@@ -113,8 +114,8 @@ async function main() {
   } catch (error) {
     refusal = error.message;
   }
-  if (refusal === undefined || !refusal.includes(missing)) {
-    throw new Error(`a read-only open of a missing file was not refused naming it: ${refusal}`);
+  if (refusal === undefined || !refusal.includes(`no vector store at ${missing}`)) {
+    throw new Error(`a read-only open of a missing file was not refused with "no vector store at" naming it: ${refusal}`);
   }
   if (existsSync(join(dir, 'absent'))) throw new Error('a read-only open of a missing file created its folder');
 

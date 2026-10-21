@@ -36,8 +36,9 @@ const CONFIG_TABLE: TableDefinition<&str, &str> = TableDefinition::new("config")
 const DB_CONFIG_KEY: &str = "__ruvector_db_config__";
 
 // Global database connection pool to allow multiple VectorDB instances
-// to share the same underlying database file. One database per file per
-// process: a read-only open of a file held writable shares that database.
+// to share the same underlying database file. Handles share a database only
+// with handles of the same mode: a read-only open never shares a writable
+// database, and a writable open never shares a read-only one.
 static DB_POOL: Lazy<Mutex<HashMap<PathBuf, PoolEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -49,7 +50,8 @@ use read_only_backend::{lock_held_error, ReadOnlyBackend};
 
 struct PoolEntry {
     db: Arc<Database>,
-    /// Opened through the read-only backend, under a shared lock.
+    /// Opened through the read-only backend, under a shared lock. Every
+    /// handle on the entry has this mode.
     read_only: bool,
 }
 
@@ -62,20 +64,21 @@ pub struct VectorStorage {
     db: ManuallyDrop<Arc<Database>>,
     pool_key: PathBuf,
     dimensions: usize,
-    /// Refuses every write. Set by `open_read_only`, also when it shares a
-    /// database this process holds writable.
+    /// Refuses every write. Set by `open_read_only`.
     read_only: bool,
 }
 
 impl VectorStorage {
     /// Create or open a vector storage at the given path
     ///
-    /// This method uses a global connection pool to allow multiple VectorDB
-    /// instances to share the same underlying database file, fixing the
-    /// "Database already open. Cannot acquire lock" error.
+    /// Writable opens of one file in this process share one database through
+    /// a global connection pool, keyed on the file's canonical path.
     ///
-    /// An existing file is written only when one of its tables is missing.
-    /// A file this process holds read-only is refused with the lock error.
+    /// An existing file's tables are created only when one is missing, so no
+    /// transaction is committed when they all exist; redb still rewrites its
+    /// header on open and close, so the modification time changes. A file
+    /// this process holds read-only is refused with "Database already open.
+    /// Cannot acquire lock." until those handles drop.
     pub fn new<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
         let path_ref = path.as_ref();
 
@@ -89,35 +92,16 @@ impl VectorStorage {
         }
 
         let path_buf = resolve_path(path_ref)?;
-
-        // Check if we already have a Database instance for this path
-        let db = {
-            let mut pool = DB_POOL.lock();
-
-            if let Some(existing) = pool.get(&path_buf) {
-                if existing.read_only {
-                    return Err(lock_held_error());
-                }
-                // Reuse existing database connection
-                Arc::clone(&existing.db)
-            } else {
-                // Create new database and add to pool
-                let new_db = Arc::new(Database::create(&path_buf)?);
-                create_missing_tables(&new_db)?;
-                pool.insert(
-                    path_buf.clone(),
-                    PoolEntry {
-                        db: Arc::clone(&new_db),
-                        read_only: false,
-                    },
-                );
-                new_db
-            }
-        };
+        let pool_key = pool_key(&path_buf)?;
+        let db = pooled(&pool_key, false, || {
+            let db = Database::create(&path_buf)?;
+            create_missing_tables(&db)?;
+            Ok(db)
+        })?;
 
         Ok(Self {
             db: ManuallyDrop::new(db),
-            pool_key: path_buf,
+            pool_key,
             dimensions,
             read_only: false,
         })
@@ -129,34 +113,30 @@ impl VectorStorage {
     ///
     /// Takes a shared lock: read-only opens from other processes coexist, and
     /// one is refused with "Database already open. Cannot acquire lock." while
-    /// a writer holds the file, as a writer is while a reader holds it. A file
-    /// this process already holds, in either mode, is shared without a new
-    /// lock. A missing file fails with an error naming it; nothing is created.
+    /// a writer holds the file, as a writer is while a reader holds it. In this
+    /// process, read-only opens of one file share one database, and a file this
+    /// process holds writable is refused with the same error until those
+    /// handles drop. A file that does not exist, is empty, or lacks one of the
+    /// vector tables is refused with "no vector store at <path>: …"; nothing
+    /// is created.
     pub fn open_read_only<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
         let path_buf = resolve_path(path.as_ref())?;
-
-        let db = {
-            let mut pool = DB_POOL.lock();
-
-            if let Some(existing) = pool.get(&path_buf) {
-                Arc::clone(&existing.db)
-            } else {
-                let backend = ReadOnlyBackend::open(&path_buf)?;
-                let new_db = Arc::new(redb::Builder::new().create_with_backend(backend)?);
-                pool.insert(
-                    path_buf.clone(),
-                    PoolEntry {
-                        db: Arc::clone(&new_db),
-                        read_only: true,
-                    },
-                );
-                new_db
+        let pool_key = pool_key(&path_buf)?;
+        let db = pooled(&pool_key, true, || {
+            let backend = ReadOnlyBackend::open(&path_buf)?;
+            if redb::StorageBackend::len(&backend)? == 0 {
+                return Err(no_vector_store(&path_buf, "the file is empty"));
             }
-        };
+            let db = redb::Builder::new().create_with_backend(backend)?;
+            if any_table_missing(&db)? {
+                return Err(no_vector_store(&path_buf, "the file has no vector tables"));
+            }
+            Ok(db)
+        })?;
 
         Ok(Self {
             db: ManuallyDrop::new(db),
-            pool_key: path_buf,
+            pool_key,
             dimensions,
             read_only: true,
         })
@@ -374,7 +354,7 @@ impl VectorStorage {
     }
 }
 
-/// The absolute path a storage file is pooled under.
+/// The absolute path of a storage file, as the caller spelled it.
 #[cfg(feature = "storage")]
 fn resolve_path(path_ref: &Path) -> Result<PathBuf> {
     // Convert to absolute path first, then validate
@@ -417,17 +397,73 @@ fn resolve_path(path_ref: &Path) -> Result<PathBuf> {
     Ok(path_buf)
 }
 
+/// The key a storage file is pooled under: the canonical path of its parent
+/// folder joined with the file name, so every spelling of one file (a
+/// symlinked folder, `..` segments) shares one entry. The parent must exist.
+#[cfg(feature = "storage")]
+fn pool_key(path: &Path) -> Result<PathBuf> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(RuvectorError::InvalidPath(format!(
+            "{} does not name a file",
+            path.display()
+        )));
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(parent) => Ok(parent.join(name)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(no_vector_store(path, "the file does not exist"))
+        }
+        Err(e) => Err(RuvectorError::IoError(e)),
+    }
+}
+
+/// The pooled database for `key` in this mode, opened by `open` when the pool
+/// holds none. A database pooled in the other mode refuses the open with the
+/// lock error, before any file is touched.
+#[cfg(feature = "storage")]
+fn pooled(
+    key: &Path,
+    read_only: bool,
+    open: impl FnOnce() -> Result<Database>,
+) -> Result<Arc<Database>> {
+    let mut pool = DB_POOL.lock();
+    if let Some(existing) = pool.get(key) {
+        if existing.read_only != read_only {
+            return Err(lock_held_error());
+        }
+        return Ok(Arc::clone(&existing.db));
+    }
+    let db = Arc::new(open()?);
+    pool.insert(
+        key.to_path_buf(),
+        PoolEntry {
+            db: Arc::clone(&db),
+            read_only,
+        },
+    );
+    Ok(db)
+}
+
+/// The refusal of a read-only open of a file that holds no vector store.
+/// Callers match the stable prefix "no vector store at".
+#[cfg(feature = "storage")]
+fn no_vector_store(path: &Path, why: &str) -> RuvectorError {
+    RuvectorError::StorageError(format!("no vector store at {}: {}", path.display(), why))
+}
+
+#[cfg(feature = "storage")]
+fn any_table_missing(db: &Database) -> Result<bool> {
+    let read_txn = db.begin_read()?;
+    Ok(table_missing(&read_txn, VECTORS_TABLE)?
+        || table_missing(&read_txn, METADATA_TABLE)?
+        || table_missing(&read_txn, CONFIG_TABLE)?)
+}
+
 /// Create the three tables in one commit, only when one is missing, so
 /// opening an existing store commits nothing.
 #[cfg(feature = "storage")]
 fn create_missing_tables(db: &Database) -> Result<()> {
-    let missing = {
-        let read_txn = db.begin_read()?;
-        table_missing(&read_txn, VECTORS_TABLE)?
-            || table_missing(&read_txn, METADATA_TABLE)?
-            || table_missing(&read_txn, CONFIG_TABLE)?
-    };
-    if missing {
+    if any_table_missing(db)? {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(VECTORS_TABLE)?;

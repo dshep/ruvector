@@ -48,10 +48,7 @@ impl ReadOnlyBackend {
     pub(super) fn open(path: &Path) -> Result<Self> {
         let file = OpenOptions::new().read(true).open(path).map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
-                RuvectorError::StorageError(format!(
-                    "cannot open {} read-only: the file does not exist",
-                    path.display()
-                ))
+                super::no_vector_store(path, "the file does not exist")
             } else {
                 RuvectorError::IoError(e)
             }
@@ -95,32 +92,42 @@ impl StorageBackend for ReadOnlyBackend {
         Ok(self.overlay()?.len)
     }
 
+    /// Copies the overlaid parts of the range out under the overlay lock, and
+    /// reads the rest from the file after releasing it, so file reads run in
+    /// parallel. The file never changes while it is open: a writer is kept
+    /// out by the shared lock.
     fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let state = self.overlay()?;
         let mut out = vec![0u8; len];
         let end = offset + len as u64;
-        let mut pos = offset;
-        while pos < end {
-            let block = pos / BLOCK;
-            if let Some(data) = state.blocks.get(&block) {
+        // Each overlaid run as (start, end) offsets; its bytes are in `out`.
+        let mut overlaid = Vec::new();
+        let file_valid = {
+            let state = self.overlay()?;
+            let mut pos = offset;
+            while pos < end {
+                let block = pos / BLOCK;
                 let to = end.min((block + 1) * BLOCK);
-                let from_in_block = (pos - block * BLOCK) as usize;
-                out[(pos - offset) as usize..(to - offset) as usize]
-                    .copy_from_slice(&data[from_in_block..from_in_block + (to - pos) as usize]);
-                pos = to;
-            } else {
-                // One file read for the run of blocks the overlay does not hold.
-                let mut to = end.min((block + 1) * BLOCK);
-                while to < end && !state.blocks.contains_key(&(to / BLOCK)) {
-                    to = end.min((to / BLOCK + 1) * BLOCK);
+                if let Some(data) = state.blocks.get(&block) {
+                    let from_in_block = (pos - block * BLOCK) as usize;
+                    out[(pos - offset) as usize..(to - offset) as usize]
+                        .copy_from_slice(&data[from_in_block..from_in_block + (to - pos) as usize]);
+                    overlaid.push((pos, to));
                 }
-                self.read_file(
-                    state.file_valid,
-                    pos,
-                    &mut out[(pos - offset) as usize..(to - offset) as usize],
-                )?;
                 pos = to;
             }
+            state.file_valid
+        };
+        // One file read for each run of blocks the overlay did not hold.
+        let mut pos = offset;
+        for (start, stop) in overlaid.into_iter().chain([(end, end)]) {
+            if pos < start {
+                self.read_file(
+                    file_valid,
+                    pos,
+                    &mut out[(pos - offset) as usize..(start - offset) as usize],
+                )?;
+            }
+            pos = stop;
         }
         Ok(out)
     }
@@ -219,6 +226,25 @@ mod tests {
         assert_eq!(backend.read(0, expected.len()).unwrap(), expected);
         assert_eq!(backend.read(BLOCK - 3, 6).unwrap(), expected[BLOCK as usize - 3..BLOCK as usize + 3]);
         assert_eq!(std::fs::read(dir.path().join("f")).unwrap(), original);
+    }
+
+    #[test]
+    fn a_read_joins_file_blocks_on_both_sides_of_an_overlaid_block() {
+        let original: Vec<u8> = (0..4 * BLOCK as usize).map(|i| (i % 253) as u8).collect();
+        let (_dir, backend) = backend_over(&original);
+
+        backend.write(BLOCK + 7, &[0xAA; 3]).unwrap();
+        backend.write(3 * BLOCK, &[0xBB]).unwrap();
+
+        let mut expected = original.clone();
+        expected[BLOCK as usize + 7..BLOCK as usize + 10].fill(0xAA);
+        expected[3 * BLOCK as usize] = 0xBB;
+        // File, overlay, file, overlay; then a range starting and ending in file blocks.
+        assert_eq!(backend.read(0, expected.len()).unwrap(), expected);
+        assert_eq!(
+            backend.read(BLOCK / 2, 2 * BLOCK as usize).unwrap(),
+            expected[BLOCK as usize / 2..BLOCK as usize / 2 + 2 * BLOCK as usize]
+        );
     }
 
     #[test]

@@ -37,12 +37,13 @@ export class VectorDb {
     /**
      * Open an existing store read-only. Nothing reaches its file: search, get,
      * len and isEmpty work as usual, and insert, insertBatch and delete reject
-     * with "the database is open read-only". A missing file is refused with an
-     * error naming it. Takes a shared lock: read-only opens from other
-     * processes coexist, a writer is refused while one holds the file and a
-     * reader while a writer holds it, each with "Database already open. Cannot
-     * acquire lock." In one process, a read-only open of a store held writable
-     * shares it, and a writable open of a store held read-only is refused.
+     * with "the database is open read-only". A file that does not exist, is
+     * empty or has no vector tables is refused with an error starting "no
+     * vector store at" and naming it; nothing is created. Takes a shared lock:
+     * read-only opens coexist and share only with each other. A read-only open
+     * is refused while this process or another holds the file writable, and a
+     * writable open while this process or another holds it read-only, each
+     * with "Database already open. Cannot acquire lock."
      */
     readOnly?: boolean;
   });
@@ -55,11 +56,13 @@ export class VectorDb {
   len(): Promise<number>;
   isEmpty(): Promise<boolean>;
   /**
-   * Release the database and its file lock. Calls issued before close() finish
-   * normally; calls issued after it reject with "the database is closed". The
-   * promise resolves once the earlier calls have finished and the file is
-   * released, without blocking the JS thread; it waits as long as they take.
-   * A second call resolves no earlier than the first.
+   * Release this handle's hold on the database. Calls issued before close()
+   * finish normally; calls issued after it reject with "the database is
+   * closed". The promise resolves once the earlier calls have finished, without
+   * blocking the JS thread; it waits as long as they take. Handles of one mode
+   * on one file in this process share its database, and the file lock is
+   * released when the last of them closes: only then can the file be opened in
+   * the other mode. A second call resolves no earlier than the first.
    */
   close(): Promise<void>;
 }

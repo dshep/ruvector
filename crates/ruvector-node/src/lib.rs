@@ -116,8 +116,9 @@ pub struct JsDbOptions {
     pub quantization: Option<JsQuantizationConfig>,
     /// Open an existing store read-only: nothing reaches its file, and
     /// insert, insertBatch and delete reject with "the database is open
-    /// read-only". Takes a shared lock, so read-only opens coexist and a
-    /// writer is refused while one holds the file. Never stored.
+    /// read-only". Takes a shared lock, so read-only opens coexist, a writer
+    /// is refused while one holds the file and a reader while a writer does,
+    /// in this process or another. Never stored.
     pub read_only: Option<bool>,
 }
 
@@ -391,13 +392,14 @@ impl VectorDB {
     pub fn new(options: JsDbOptions) -> Result<Self> {
         let read_only = options.read_only.unwrap_or(false);
         let core_options: DbOptions = options.into();
-        let opened = if read_only {
-            CoreVectorDB::open_read_only(core_options)
+        let db = if read_only {
+            CoreVectorDB::open_read_only(core_options).map_err(|e| {
+                Error::from_reason(format!("Failed to open database read-only: {}", e))
+            })?
         } else {
             CoreVectorDB::new(core_options)
+                .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?
         };
-        let db = opened
-            .map_err(|e| Error::from_reason(format!("Failed to create database: {}", e)))?;
 
         Ok(Self::open(db))
     }
