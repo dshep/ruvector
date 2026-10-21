@@ -36,9 +36,27 @@ const CONFIG_TABLE: TableDefinition<&str, &str> = TableDefinition::new("config")
 const DB_CONFIG_KEY: &str = "__ruvector_db_config__";
 
 // Global database connection pool to allow multiple VectorDB instances
-// to share the same underlying database file
-static DB_POOL: Lazy<Mutex<HashMap<PathBuf, Arc<Database>>>> =
+// to share the same underlying database file. Handles share a database only
+// with handles of the same mode: a read-only open never shares a writable
+// database, and a writable open never shares a read-only one.
+static DB_POOL: Lazy<Mutex<HashMap<PathBuf, PoolEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "storage")]
+mod read_only_backend;
+
+#[cfg(feature = "storage")]
+use read_only_backend::ReadOnlyBackend;
+
+struct PoolEntry {
+    db: Arc<Database>,
+    /// Opened through the read-only backend, under a shared lock. Every
+    /// handle on the entry has this mode.
+    read_only: bool,
+}
+
+/// The error every write on a read-only storage returns.
+const READ_ONLY_MESSAGE: &str = "the database is open read-only";
 
 /// Storage backend for vector database
 pub struct VectorStorage {
@@ -46,16 +64,24 @@ pub struct VectorStorage {
     db: ManuallyDrop<Arc<Database>>,
     pool_key: PathBuf,
     dimensions: usize,
+    /// Refuses every write. Set by `open_read_only`.
+    read_only: bool,
 }
 
 impl VectorStorage {
     /// Create or open a vector storage at the given path
     ///
-    /// This method uses a global connection pool to allow multiple VectorDB
-    /// instances to share the same underlying database file, fixing the
-    /// "Database already open. Cannot acquire lock" error.
+    /// Writable opens of one file in this process share one database through
+    /// a global connection pool, keyed on the canonical path of the file's
+    /// folder plus its name (see `pool_key`).
+    ///
+    /// An existing file's tables are created only when one is missing, so no
+    /// transaction is committed when they all exist; redb still rewrites its
+    /// header on open and close, so the modification time changes. A file
+    /// this process holds read-only is refused with "Database already open.
+    /// Cannot acquire lock. (this process holds the file in the other mode)"
+    /// until those handles drop.
     pub fn new<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
-        // SECURITY: Validate path to prevent directory traversal attacks
         let path_ref = path.as_ref();
 
         // Create parent directories if they don't exist (needed for canonicalize)
@@ -67,77 +93,74 @@ impl VectorStorage {
             }
         }
 
-        // Convert to absolute path first, then validate
-        let path_buf = if path_ref.is_absolute() {
-            path_ref.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| RuvectorError::InvalidPath(format!("Failed to get cwd: {}", e)))?
-                .join(path_ref)
-        };
-
-        // SECURITY: Check for path traversal attempts (e.g., "../../../etc/passwd")
-        // Only reject paths that contain ".." components trying to escape
-        let path_str = path_ref.to_string_lossy();
-        if path_str.contains("..") {
-            // Verify the resolved path doesn't escape intended boundaries
-            // For absolute paths, we allow them as-is (user explicitly specified)
-            // For relative paths with "..", check they don't escape cwd
-            if !path_ref.is_absolute() {
-                if let Ok(cwd) = std::env::current_dir() {
-                    // Normalize the path by resolving .. components
-                    let mut normalized = cwd.clone();
-                    for component in path_ref.components() {
-                        match component {
-                            std::path::Component::ParentDir => {
-                                if !normalized.pop() || !normalized.starts_with(&cwd) {
-                                    return Err(RuvectorError::InvalidPath(
-                                        "Path traversal attempt detected".to_string(),
-                                    ));
-                                }
-                            }
-                            std::path::Component::Normal(c) => normalized.push(c),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check if we already have a Database instance for this path
-        let db = {
-            let mut pool = DB_POOL.lock();
-
-            if let Some(existing_db) = pool.get(&path_buf) {
-                // Reuse existing database connection
-                Arc::clone(existing_db)
-            } else {
-                // Create new database and add to pool
-                let new_db = Arc::new(Database::create(&path_buf)?);
-
-                // Initialize tables
-                let write_txn = new_db.begin_write()?;
-                {
-                    let _ = write_txn.open_table(VECTORS_TABLE)?;
-                    let _ = write_txn.open_table(METADATA_TABLE)?;
-                    let _ = write_txn.open_table(CONFIG_TABLE)?;
-                }
-                write_txn.commit()?;
-
-                pool.insert(path_buf.clone(), Arc::clone(&new_db));
-                new_db
-            }
-        };
+        let path_buf = resolve_path(path_ref)?;
+        let pool_key = pool_key(&path_buf)?;
+        let db = pooled(&pool_key, false, || {
+            let db = Database::create(&path_buf)?;
+            create_missing_tables(&db)?;
+            Ok(db)
+        })?;
 
         Ok(Self {
             db: ManuallyDrop::new(db),
-            pool_key: path_buf,
+            pool_key,
             dimensions,
+            read_only: false,
         })
+    }
+
+    /// Open an existing vector storage read-only. Nothing it does reaches the
+    /// file: redb's own header writes stay in memory, and every write method
+    /// fails with "the database is open read-only".
+    ///
+    /// Takes a shared lock: read-only opens from other processes coexist, and
+    /// one is refused with "Database already open. Cannot acquire lock." while
+    /// a writer holds the file, as a writer is while a reader holds it. In this
+    /// process, read-only opens of one file share one database, and a file this
+    /// process holds writable is refused with the same error followed by " (this
+    /// process holds the file in the other mode)" until those handles drop. A
+    /// file that does not exist, is empty, or lacks the vectors or metadata
+    /// table is refused with "no vector store at <path>: …"; nothing is
+    /// created. A file without the config table opens: it was written before
+    /// that table existed.
+    pub fn open_read_only<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
+        let path_buf = resolve_path(path.as_ref())?;
+        let pool_key = pool_key(&path_buf)?;
+        let db = pooled(&pool_key, true, || {
+            let backend = ReadOnlyBackend::open(&path_buf)?;
+            if redb::StorageBackend::len(&backend)? == 0 {
+                return Err(no_vector_store(&path_buf, "the file is empty"));
+            }
+            let db = redb::Builder::new().create_with_backend(backend)?;
+            if vector_tables_missing(&db.begin_read()?)? {
+                return Err(no_vector_store(&path_buf, "the file has no vector tables"));
+            }
+            Ok(db)
+        })?;
+
+        Ok(Self {
+            db: ManuallyDrop::new(db),
+            pool_key,
+            dimensions,
+            read_only: true,
+        })
+    }
+
+    /// Whether this storage refuses writes.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn refuse_if_read_only(&self) -> Result<()> {
+        if self.read_only {
+            return Err(RuvectorError::StorageError(READ_ONLY_MESSAGE.to_string()));
+        }
+        Ok(())
     }
 
     /// Insert a vector entry
     pub fn insert(&self, entry: &VectorEntry) -> Result<VectorId> {
+        self.refuse_if_read_only()?;
         if entry.vector.len() != self.dimensions {
             return Err(RuvectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -175,6 +198,7 @@ impl VectorStorage {
 
     /// Insert multiple vectors in a batch
     pub fn insert_batch(&self, entries: &[VectorEntry]) -> Result<Vec<VectorId>> {
+        self.refuse_if_read_only()?;
         let write_txn = self.db.begin_write()?;
         let mut ids = Vec::with_capacity(entries.len());
 
@@ -249,6 +273,7 @@ impl VectorStorage {
 
     /// Delete a vector by ID
     pub fn delete(&self, id: &str) -> Result<bool> {
+        self.refuse_if_read_only()?;
         let write_txn = self.db.begin_write()?;
         let mut deleted = false;
 
@@ -293,6 +318,7 @@ impl VectorStorage {
 
     /// Save database configuration to persistent storage
     pub fn save_config(&self, options: &DbOptions) -> Result<()> {
+        self.refuse_if_read_only()?;
         let config_json = serde_json::to_string(options)
             .map_err(|e| RuvectorError::SerializationError(e.to_string()))?;
 
@@ -332,6 +358,157 @@ impl VectorStorage {
     }
 }
 
+/// The absolute path of a storage file, as the caller spelled it.
+#[cfg(feature = "storage")]
+fn resolve_path(path_ref: &Path) -> Result<PathBuf> {
+    // Convert to absolute path first, then validate
+    let path_buf = if path_ref.is_absolute() {
+        path_ref.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| RuvectorError::InvalidPath(format!("Failed to get cwd: {}", e)))?
+            .join(path_ref)
+    };
+
+    // SECURITY: Check for path traversal attempts (e.g., "../../../etc/passwd")
+    // Only reject paths that contain ".." components trying to escape
+    let path_str = path_ref.to_string_lossy();
+    if path_str.contains("..") {
+        // Verify the resolved path doesn't escape intended boundaries
+        // For absolute paths, we allow them as-is (user explicitly specified)
+        // For relative paths with "..", check they don't escape cwd
+        if !path_ref.is_absolute() {
+            if let Ok(cwd) = std::env::current_dir() {
+                // Normalize the path by resolving .. components
+                let mut normalized = cwd.clone();
+                for component in path_ref.components() {
+                    match component {
+                        std::path::Component::ParentDir => {
+                            if !normalized.pop() || !normalized.starts_with(&cwd) {
+                                return Err(RuvectorError::InvalidPath(
+                                    "Path traversal attempt detected".to_string(),
+                                ));
+                            }
+                        }
+                        std::path::Component::Normal(c) => normalized.push(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(path_buf)
+}
+
+/// The key a storage file is pooled under: the canonical path of its folder
+/// joined with the file name as given, so spellings that differ only in how
+/// they reach the folder (a symlinked folder, `..` segments) share one entry.
+/// A symlink to the file itself has its own name, so it keys apart. The
+/// folder must exist.
+#[cfg(feature = "storage")]
+fn pool_key(path: &Path) -> Result<PathBuf> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(RuvectorError::InvalidPath(format!(
+            "{} does not name a file",
+            path.display()
+        )));
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(parent) => Ok(parent.join(name)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(no_vector_store(path, "the file does not exist"))
+        }
+        Err(e) => Err(RuvectorError::IoError(e)),
+    }
+}
+
+/// The pooled database for `key` in this mode, opened by `open` when the pool
+/// holds none. A database pooled in the other mode refuses the open with
+/// redb's lock text plus a note that this process is the holder, before any
+/// file is touched.
+#[cfg(feature = "storage")]
+fn pooled(
+    key: &Path,
+    read_only: bool,
+    open: impl FnOnce() -> Result<Database>,
+) -> Result<Arc<Database>> {
+    let mut pool = DB_POOL.lock();
+    if let Some(existing) = pool.get(key) {
+        if existing.read_only != read_only {
+            return Err(held_in_other_mode_error());
+        }
+        return Ok(Arc::clone(&existing.db));
+    }
+    let db = Arc::new(open()?);
+    pool.insert(
+        key.to_path_buf(),
+        PoolEntry {
+            db: Arc::clone(&db),
+            read_only,
+        },
+    );
+    Ok(db)
+}
+
+/// The refusal of an open in one mode while this process holds the file in
+/// the other. It keeps redb's lock text, which callers match, and says the
+/// holder is this process; a refusal by another process's lock has redb's
+/// text alone.
+#[cfg(feature = "storage")]
+fn held_in_other_mode_error() -> RuvectorError {
+    RuvectorError::DatabaseError(format!(
+        "{} (this process holds the file in the other mode)",
+        redb::DatabaseError::DatabaseAlreadyOpen
+    ))
+}
+
+/// The refusal of a read-only open of a file that holds no vector store.
+/// Its message contains the phrase "no vector store at", which callers match.
+#[cfg(feature = "storage")]
+fn no_vector_store(path: &Path, why: &str) -> RuvectorError {
+    RuvectorError::StorageError(format!("no vector store at {}: {}", path.display(), why))
+}
+
+/// Whether the vectors or metadata table is missing: a file lacking either
+/// holds no vector store. The config table is not required, because stores
+/// written before it existed have none.
+#[cfg(feature = "storage")]
+fn vector_tables_missing(read_txn: &redb::ReadTransaction) -> Result<bool> {
+    Ok(table_missing(read_txn, VECTORS_TABLE)? || table_missing(read_txn, METADATA_TABLE)?)
+}
+
+/// Create the three tables in one commit, only when one is missing, so
+/// opening an existing store commits nothing.
+#[cfg(feature = "storage")]
+fn create_missing_tables(db: &Database) -> Result<()> {
+    let read_txn = db.begin_read()?;
+    let missing = vector_tables_missing(&read_txn)? || table_missing(&read_txn, CONFIG_TABLE)?;
+    drop(read_txn);
+    if missing {
+        let write_txn = db.begin_write()?;
+        {
+            let _ = write_txn.open_table(VECTORS_TABLE)?;
+            let _ = write_txn.open_table(METADATA_TABLE)?;
+            let _ = write_txn.open_table(CONFIG_TABLE)?;
+        }
+        write_txn.commit()?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "storage")]
+fn table_missing<K: redb::Key + 'static, V: redb::Value + 'static>(
+    read_txn: &redb::ReadTransaction,
+    table: TableDefinition<K, V>,
+) -> Result<bool> {
+    match read_txn.open_table(table) {
+        Ok(_) => Ok(false),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(true),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Dropping the last storage on a file removes its pool entry, which drops the
 /// database and releases the file lock. The handle is dropped and the entry
 /// checked under the pool lock, where every other clone and drop of a pooled
@@ -345,7 +522,7 @@ impl Drop for VectorStorage {
         let db = unsafe { ManuallyDrop::take(&mut self.db) };
         let last_holder = pool
             .get(&self.pool_key)
-            .is_some_and(|pooled| Arc::ptr_eq(pooled, &db) && Arc::strong_count(&db) == 2);
+            .is_some_and(|pooled| Arc::ptr_eq(&pooled.db, &db) && Arc::strong_count(&db) == 2);
         drop(db);
         if last_holder {
             pool.remove(&self.pool_key);
