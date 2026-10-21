@@ -36,9 +36,25 @@ const CONFIG_TABLE: TableDefinition<&str, &str> = TableDefinition::new("config")
 const DB_CONFIG_KEY: &str = "__ruvector_db_config__";
 
 // Global database connection pool to allow multiple VectorDB instances
-// to share the same underlying database file
-static DB_POOL: Lazy<Mutex<HashMap<PathBuf, Arc<Database>>>> =
+// to share the same underlying database file. One database per file per
+// process: a read-only open of a file held writable shares that database.
+static DB_POOL: Lazy<Mutex<HashMap<PathBuf, PoolEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "storage")]
+mod read_only_backend;
+
+#[cfg(feature = "storage")]
+use read_only_backend::{lock_held_error, ReadOnlyBackend};
+
+struct PoolEntry {
+    db: Arc<Database>,
+    /// Opened through the read-only backend, under a shared lock.
+    read_only: bool,
+}
+
+/// The error every write on a read-only storage returns.
+const READ_ONLY_MESSAGE: &str = "the database is open read-only";
 
 /// Storage backend for vector database
 pub struct VectorStorage {
@@ -46,6 +62,9 @@ pub struct VectorStorage {
     db: ManuallyDrop<Arc<Database>>,
     pool_key: PathBuf,
     dimensions: usize,
+    /// Refuses every write. Set by `open_read_only`, also when it shares a
+    /// database this process holds writable.
+    read_only: bool,
 }
 
 impl VectorStorage {
@@ -54,8 +73,10 @@ impl VectorStorage {
     /// This method uses a global connection pool to allow multiple VectorDB
     /// instances to share the same underlying database file, fixing the
     /// "Database already open. Cannot acquire lock" error.
+    ///
+    /// An existing file is written only when one of its tables is missing.
+    /// A file this process holds read-only is refused with the lock error.
     pub fn new<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
-        // SECURITY: Validate path to prevent directory traversal attacks
         let path_ref = path.as_ref();
 
         // Create parent directories if they don't exist (needed for canonicalize)
@@ -67,64 +88,29 @@ impl VectorStorage {
             }
         }
 
-        // Convert to absolute path first, then validate
-        let path_buf = if path_ref.is_absolute() {
-            path_ref.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| RuvectorError::InvalidPath(format!("Failed to get cwd: {}", e)))?
-                .join(path_ref)
-        };
-
-        // SECURITY: Check for path traversal attempts (e.g., "../../../etc/passwd")
-        // Only reject paths that contain ".." components trying to escape
-        let path_str = path_ref.to_string_lossy();
-        if path_str.contains("..") {
-            // Verify the resolved path doesn't escape intended boundaries
-            // For absolute paths, we allow them as-is (user explicitly specified)
-            // For relative paths with "..", check they don't escape cwd
-            if !path_ref.is_absolute() {
-                if let Ok(cwd) = std::env::current_dir() {
-                    // Normalize the path by resolving .. components
-                    let mut normalized = cwd.clone();
-                    for component in path_ref.components() {
-                        match component {
-                            std::path::Component::ParentDir => {
-                                if !normalized.pop() || !normalized.starts_with(&cwd) {
-                                    return Err(RuvectorError::InvalidPath(
-                                        "Path traversal attempt detected".to_string(),
-                                    ));
-                                }
-                            }
-                            std::path::Component::Normal(c) => normalized.push(c),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
+        let path_buf = resolve_path(path_ref)?;
 
         // Check if we already have a Database instance for this path
         let db = {
             let mut pool = DB_POOL.lock();
 
-            if let Some(existing_db) = pool.get(&path_buf) {
+            if let Some(existing) = pool.get(&path_buf) {
+                if existing.read_only {
+                    return Err(lock_held_error());
+                }
                 // Reuse existing database connection
-                Arc::clone(existing_db)
+                Arc::clone(&existing.db)
             } else {
                 // Create new database and add to pool
                 let new_db = Arc::new(Database::create(&path_buf)?);
-
-                // Initialize tables
-                let write_txn = new_db.begin_write()?;
-                {
-                    let _ = write_txn.open_table(VECTORS_TABLE)?;
-                    let _ = write_txn.open_table(METADATA_TABLE)?;
-                    let _ = write_txn.open_table(CONFIG_TABLE)?;
-                }
-                write_txn.commit()?;
-
-                pool.insert(path_buf.clone(), Arc::clone(&new_db));
+                create_missing_tables(&new_db)?;
+                pool.insert(
+                    path_buf.clone(),
+                    PoolEntry {
+                        db: Arc::clone(&new_db),
+                        read_only: false,
+                    },
+                );
                 new_db
             }
         };
@@ -133,11 +119,64 @@ impl VectorStorage {
             db: ManuallyDrop::new(db),
             pool_key: path_buf,
             dimensions,
+            read_only: false,
         })
+    }
+
+    /// Open an existing vector storage read-only. Nothing it does reaches the
+    /// file: redb's own header writes stay in memory, and every write method
+    /// fails with "the database is open read-only".
+    ///
+    /// Takes a shared lock: read-only opens from other processes coexist, and
+    /// one is refused with "Database already open. Cannot acquire lock." while
+    /// a writer holds the file, as a writer is while a reader holds it. A file
+    /// this process already holds, in either mode, is shared without a new
+    /// lock. A missing file fails with an error naming it; nothing is created.
+    pub fn open_read_only<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
+        let path_buf = resolve_path(path.as_ref())?;
+
+        let db = {
+            let mut pool = DB_POOL.lock();
+
+            if let Some(existing) = pool.get(&path_buf) {
+                Arc::clone(&existing.db)
+            } else {
+                let backend = ReadOnlyBackend::open(&path_buf)?;
+                let new_db = Arc::new(redb::Builder::new().create_with_backend(backend)?);
+                pool.insert(
+                    path_buf.clone(),
+                    PoolEntry {
+                        db: Arc::clone(&new_db),
+                        read_only: true,
+                    },
+                );
+                new_db
+            }
+        };
+
+        Ok(Self {
+            db: ManuallyDrop::new(db),
+            pool_key: path_buf,
+            dimensions,
+            read_only: true,
+        })
+    }
+
+    /// Whether this storage refuses writes.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn refuse_if_read_only(&self) -> Result<()> {
+        if self.read_only {
+            return Err(RuvectorError::StorageError(READ_ONLY_MESSAGE.to_string()));
+        }
+        Ok(())
     }
 
     /// Insert a vector entry
     pub fn insert(&self, entry: &VectorEntry) -> Result<VectorId> {
+        self.refuse_if_read_only()?;
         if entry.vector.len() != self.dimensions {
             return Err(RuvectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -175,6 +214,7 @@ impl VectorStorage {
 
     /// Insert multiple vectors in a batch
     pub fn insert_batch(&self, entries: &[VectorEntry]) -> Result<Vec<VectorId>> {
+        self.refuse_if_read_only()?;
         let write_txn = self.db.begin_write()?;
         let mut ids = Vec::with_capacity(entries.len());
 
@@ -249,6 +289,7 @@ impl VectorStorage {
 
     /// Delete a vector by ID
     pub fn delete(&self, id: &str) -> Result<bool> {
+        self.refuse_if_read_only()?;
         let write_txn = self.db.begin_write()?;
         let mut deleted = false;
 
@@ -293,6 +334,7 @@ impl VectorStorage {
 
     /// Save database configuration to persistent storage
     pub fn save_config(&self, options: &DbOptions) -> Result<()> {
+        self.refuse_if_read_only()?;
         let config_json = serde_json::to_string(options)
             .map_err(|e| RuvectorError::SerializationError(e.to_string()))?;
 
@@ -332,6 +374,83 @@ impl VectorStorage {
     }
 }
 
+/// The absolute path a storage file is pooled under.
+#[cfg(feature = "storage")]
+fn resolve_path(path_ref: &Path) -> Result<PathBuf> {
+    // Convert to absolute path first, then validate
+    let path_buf = if path_ref.is_absolute() {
+        path_ref.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| RuvectorError::InvalidPath(format!("Failed to get cwd: {}", e)))?
+            .join(path_ref)
+    };
+
+    // SECURITY: Check for path traversal attempts (e.g., "../../../etc/passwd")
+    // Only reject paths that contain ".." components trying to escape
+    let path_str = path_ref.to_string_lossy();
+    if path_str.contains("..") {
+        // Verify the resolved path doesn't escape intended boundaries
+        // For absolute paths, we allow them as-is (user explicitly specified)
+        // For relative paths with "..", check they don't escape cwd
+        if !path_ref.is_absolute() {
+            if let Ok(cwd) = std::env::current_dir() {
+                // Normalize the path by resolving .. components
+                let mut normalized = cwd.clone();
+                for component in path_ref.components() {
+                    match component {
+                        std::path::Component::ParentDir => {
+                            if !normalized.pop() || !normalized.starts_with(&cwd) {
+                                return Err(RuvectorError::InvalidPath(
+                                    "Path traversal attempt detected".to_string(),
+                                ));
+                            }
+                        }
+                        std::path::Component::Normal(c) => normalized.push(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(path_buf)
+}
+
+/// Create the three tables in one commit, only when one is missing, so
+/// opening an existing store commits nothing.
+#[cfg(feature = "storage")]
+fn create_missing_tables(db: &Database) -> Result<()> {
+    let missing = {
+        let read_txn = db.begin_read()?;
+        table_missing(&read_txn, VECTORS_TABLE)?
+            || table_missing(&read_txn, METADATA_TABLE)?
+            || table_missing(&read_txn, CONFIG_TABLE)?
+    };
+    if missing {
+        let write_txn = db.begin_write()?;
+        {
+            let _ = write_txn.open_table(VECTORS_TABLE)?;
+            let _ = write_txn.open_table(METADATA_TABLE)?;
+            let _ = write_txn.open_table(CONFIG_TABLE)?;
+        }
+        write_txn.commit()?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "storage")]
+fn table_missing<K: redb::Key + 'static, V: redb::Value + 'static>(
+    read_txn: &redb::ReadTransaction,
+    table: TableDefinition<K, V>,
+) -> Result<bool> {
+    match read_txn.open_table(table) {
+        Ok(_) => Ok(false),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(true),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Dropping the last storage on a file removes its pool entry, which drops the
 /// database and releases the file lock. The handle is dropped and the entry
 /// checked under the pool lock, where every other clone and drop of a pooled
@@ -345,7 +464,7 @@ impl Drop for VectorStorage {
         let db = unsafe { ManuallyDrop::take(&mut self.db) };
         let last_holder = pool
             .get(&self.pool_key)
-            .is_some_and(|pooled| Arc::ptr_eq(pooled, &db) && Arc::strong_count(&db) == 2);
+            .is_some_and(|pooled| Arc::ptr_eq(&pooled.db, &db) && Arc::strong_count(&db) == 2);
         drop(db);
         if last_holder {
             pool.remove(&self.pool_key);

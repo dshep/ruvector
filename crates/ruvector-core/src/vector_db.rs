@@ -32,12 +32,38 @@ impl VectorDB {
     /// the HNSW index will be automatically rebuilt from storage.
     /// If opening an existing database, the stored configuration (dimensions,
     /// distance metric, etc.) will be used instead of the provided options.
-    pub fn new(mut options: DbOptions) -> Result<Self> {
+    pub fn new(options: DbOptions) -> Result<Self> {
+        Self::open(options, false)
+    }
+
+    /// Open an existing database read-only. Nothing reaches its file, and
+    /// `insert`, `insert_batch` and `delete` fail with "the database is open
+    /// read-only". Uses the stored configuration as `new` does; a file with
+    /// none opens with `options` and saves nothing. The file is held under a
+    /// shared lock: see [`VectorStorage::open_read_only`].
+    #[cfg(feature = "storage")]
+    pub fn open_read_only(options: DbOptions) -> Result<Self> {
+        Self::open(options, true)
+    }
+
+    // The mode is an argument, never a field of `DbOptions`, which is saved
+    // into every new database.
+    #[cfg_attr(not(feature = "storage"), allow(unused_variables))]
+    fn open(mut options: DbOptions, read_only: bool) -> Result<Self> {
+        #[cfg(feature = "storage")]
+        let open_storage = |path: &str, dimensions: usize| {
+            if read_only {
+                VectorStorage::open_read_only(path, dimensions)
+            } else {
+                VectorStorage::new(path, dimensions)
+            }
+        };
+
         #[cfg(feature = "storage")]
         let storage = {
             // First, try to load existing configuration from the database
             // We create a temporary storage to check for config
-            let temp_storage = VectorStorage::new(&options.storage_path, options.dimensions)?;
+            let temp_storage = open_storage(&options.storage_path, options.dimensions)?;
 
             let stored_config = temp_storage.load_config()?;
 
@@ -57,10 +83,10 @@ impl VectorDB {
                     quantization: config.quantization,
                 };
                 // Recreate storage with correct dimensions
-                Arc::new(VectorStorage::new(
-                    &options.storage_path,
-                    options.dimensions,
-                )?)
+                Arc::new(open_storage(&options.storage_path, options.dimensions)?)
+            } else if read_only {
+                // No stored configuration: read with the caller's, save nothing
+                Arc::new(temp_storage)
             } else {
                 // New database - save the configuration
                 tracing::info!(
