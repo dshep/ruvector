@@ -9,13 +9,17 @@
 // modification time are unchanged. Then, from a second process: a second
 // reader opens while this process holds a reader, a writer is refused while
 // this process holds a reader, and a reader is refused while this process holds
-// a writer, each refusal with the lock message LedgerDB recognises. A read-only
-// open of a missing file is refused with "no vector store at" and its path,
-// and creates nothing.
+// a writer, each refusal with the lock message LedgerDB recognises. In this
+// process: a reader is refused while a writer is open, with the lock message
+// and a note that this process is the holder, and opens once the writer's
+// close() resolves; a writer is then refused while that reader is open. A
+// read-only open of a missing file is refused with "no vector store at" and its
+// path, and creates nothing; one of an empty file is refused the same way and
+// leaves it empty.
 // Exits non-zero on any failure.
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
-const { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync } = require('node:fs');
+const { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 
@@ -26,6 +30,7 @@ if (!enginePath) {
 }
 
 const LOCK = /cannot acquire lock|already open/i;
+const HELD_HERE = /this process holds the file in the other mode/;
 const READ_ONLY = /the database is open read-only/;
 
 const dir = mkdtempSync(join(tmpdir(), 'ruvector-read-only-'));
@@ -55,9 +60,39 @@ function openInChild(readOnly) {
   return JSON.parse(execFileSync(process.execPath, ['-e', child]).toString());
 }
 
+// A refusal by another process's lock: the lock message, with no in-process note.
 function expectRefused(outcome, what) {
   if (outcome.error === undefined) throw new Error(`${what}: opened (read ${outcome.count} vectors)`);
   if (!LOCK.test(outcome.error)) throw new Error(`${what}: refused without the lock message: ${outcome.error}`);
+  if (HELD_HERE.test(outcome.error)) throw new Error(`${what}: refused as if this process held the file: ${outcome.error}`);
+}
+
+// The message an open throws, or undefined when it opens (the handle is closed).
+async function openError(open) {
+  let db;
+  try {
+    db = open();
+  } catch (error) {
+    return String(error.message);
+  }
+  await db.close();
+  return undefined;
+}
+
+// A refusal by this process's own hold: the lock message and the in-process note.
+async function expectRefusedHere(open, what) {
+  const message = await openError(open);
+  if (message === undefined) throw new Error(`${what}: opened`);
+  if (!LOCK.test(message)) throw new Error(`${what}: refused without the lock message: ${message}`);
+  if (!HELD_HERE.test(message)) throw new Error(`${what}: refused without saying this process holds the file: ${message}`);
+}
+
+// A read-only open of a file that holds no store: refused naming it.
+async function expectNoVectorStore(VectorDb, path, what) {
+  const message = await openError(() => new VectorDb({ dimensions: 3, storagePath: path, readOnly: true }));
+  if (message === undefined || !message.includes(`no vector store at ${path}`)) {
+    throw new Error(`a read-only open of ${what} was not refused with "no vector store at" naming it: ${message}`);
+  }
 }
 
 async function expectRejected(call, what) {
@@ -105,19 +140,28 @@ async function main() {
 
   const holder = new VectorDb({ dimensions: 3, storagePath });
   expectRefused(openInChild(true), 'a reader in another process while a writer holds the file');
+  await expectRefusedHere(
+    () => new VectorDb({ dimensions: 3, storagePath, readOnly: true }),
+    'a reader in this process while it holds the file writable',
+  );
   await holder.close();
 
+  const lateReader = new VectorDb({ dimensions: 3, storagePath, readOnly: true });
+  if ((await lateReader.len()) !== 2) throw new Error('a reader opened after the writer closed did not count 2 vectors');
+  await expectRefusedHere(
+    () => new VectorDb({ dimensions: 3, storagePath }),
+    'a writer in this process while it holds the file read-only',
+  );
+  await lateReader.close();
+
   const missing = join(dir, 'absent', 'store.vectors');
-  let refusal;
-  try {
-    new VectorDb({ dimensions: 3, storagePath: missing, readOnly: true });
-  } catch (error) {
-    refusal = error.message;
-  }
-  if (refusal === undefined || !refusal.includes(`no vector store at ${missing}`)) {
-    throw new Error(`a read-only open of a missing file was not refused with "no vector store at" naming it: ${refusal}`);
-  }
+  await expectNoVectorStore(VectorDb, missing, 'a missing file');
   if (existsSync(join(dir, 'absent'))) throw new Error('a read-only open of a missing file created its folder');
+
+  const empty = join(dir, 'empty.vectors');
+  writeFileSync(empty, '');
+  await expectNoVectorStore(VectorDb, empty, 'an empty file');
+  if (statSync(empty).size !== 0) throw new Error('a read-only open of an empty file changed its size');
 
   console.log(`read-only-check: ok — ${enginePath}`);
 }

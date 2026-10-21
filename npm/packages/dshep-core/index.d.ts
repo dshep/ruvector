@@ -38,12 +38,15 @@ export class VectorDb {
      * Open an existing store read-only. Nothing reaches its file: search, get,
      * len and isEmpty work as usual, and insert, insertBatch and delete reject
      * with "the database is open read-only". A file that does not exist, is
-     * empty or has no vector tables is refused with an error starting "no
-     * vector store at" and naming it; nothing is created. Takes a shared lock:
-     * read-only opens coexist and share only with each other. A read-only open
-     * is refused while this process or another holds the file writable, and a
-     * writable open while this process or another holds it read-only, each
-     * with "Database already open. Cannot acquire lock."
+     * empty or has no vector tables is refused with an error whose message
+     * contains the phrase "no vector store at" and names the file; nothing is
+     * created. Takes a shared lock: read-only opens coexist and share only
+     * with each other. A read-only open is refused while this process or
+     * another holds the file writable, and a writable open while this process
+     * or another holds it read-only, each with an error whose message contains
+     * "Database already open. Cannot acquire lock."; when the holder is this
+     * process, that text is followed by " (this process holds the file in the
+     * other mode)".
      */
     readOnly?: boolean;
   });

@@ -16,6 +16,7 @@ use tempfile::tempdir;
 const ROLE_ENV: &str = "RUVECTOR_READ_ONLY_PROBE_ROLE";
 const PATH_ENV: &str = "RUVECTOR_READ_ONLY_PROBE_PATH";
 const LOCK_MESSAGE: &str = "Database already open. Cannot acquire lock.";
+const IN_PROCESS_SUFFIX: &str = " (this process holds the file in the other mode)";
 const READ_ONLY_MESSAGE: &str = "the database is open read-only";
 const UNCLEAN_COUNT: usize = 40;
 
@@ -137,9 +138,15 @@ fn probe(role: &str, path: &Path) -> Result<usize, String> {
     }
 }
 
+/// A refusal by another process's lock: redb's own text, with nothing added.
 fn assert_lock_refused<T: std::fmt::Debug>(outcome: Result<T, String>, what: &str) {
     let message = outcome.expect_err(what);
-    assert!(message.contains(LOCK_MESSAGE), "{what}: {message}");
+    assert!(message.ends_with(LOCK_MESSAGE), "{what}: {message}");
+}
+
+/// A refusal by this process's pool: redb's lock text, then the in-process note.
+fn assert_in_process_refusal(message: &str) {
+    assert!(message.ends_with(&format!("{LOCK_MESSAGE}{IN_PROCESS_SUFFIX}")), "{message}");
 }
 
 #[test]
@@ -350,14 +357,14 @@ fn a_read_only_open_is_refused_while_this_process_holds_the_file_writable() {
     let second_writer = VectorStorage::new(&path, 3).unwrap();
 
     let message = VectorStorage::open_read_only(&path, 3).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
     let message = VectorDB::open_read_only(options(&path)).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
 
     // Refused until every writable handle drops.
     drop(writer);
     let message = VectorStorage::open_read_only(&path, 3).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
     drop(second_writer);
 
     let reader = VectorStorage::open_read_only(&path, 3).unwrap();
@@ -375,14 +382,14 @@ fn a_writable_open_is_refused_while_this_process_holds_the_file_read_only() {
     let reader = VectorStorage::open_read_only(&path, 3).unwrap();
     let second_reader = VectorStorage::open_read_only(&path, 3).unwrap();
     let message = VectorStorage::new(&path, 3).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
     let message = VectorDB::new(options(&path)).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
 
     // Refused until every read-only handle drops.
     drop(reader);
     let message = VectorStorage::new(&path, 3).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
     drop(second_reader);
     assert_eq!(VectorStorage::new(&path, 3).unwrap().len().unwrap(), 2);
 }
@@ -428,6 +435,47 @@ fn a_read_only_open_of_a_redb_file_without_the_vector_tables_is_refused() {
 }
 
 #[test]
+fn a_read_only_open_of_a_store_without_the_config_table_reads_it_unchanged() {
+    // A store written before the config table existed holds only the vectors
+    // and metadata tables.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("store.vectors");
+    {
+        let storage = VectorStorage::new(&path, 3).unwrap();
+        storage.insert(&entry("a", [1.0, 0.0, 0.0])).unwrap();
+    }
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let txn = db.begin_write().unwrap();
+        let config: redb::TableDefinition<&str, &str> = redb::TableDefinition::new("config");
+        assert!(txn.delete_table(config).unwrap(), "the config table existed");
+        txn.commit().unwrap();
+    }
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let txn = db.begin_read().unwrap();
+        let mut tables: Vec<String> = txn.list_tables().unwrap().map(|t| redb::TableHandle::name(&t).to_string()).collect();
+        tables.sort();
+        assert_eq!(tables, ["metadata", "vectors"]);
+    }
+    pin_mtime(&path);
+    let before = snapshot(&path);
+
+    {
+        let storage = VectorStorage::open_read_only(&path, 3).unwrap();
+        let stored = storage.get("a").unwrap().expect("the vector reads back");
+        assert_eq!(stored.vector, vec![1.0, 0.0, 0.0]);
+        assert!(storage.load_config().unwrap().is_none());
+    }
+    {
+        let db = VectorDB::open_read_only(options(&path)).unwrap();
+        assert_eq!(db.search(query([1.0, 0.0, 0.0], 1)).unwrap()[0].id, "a");
+    }
+
+    assert_unchanged(&path, &before);
+}
+
+#[test]
 fn a_read_only_open_of_a_missing_file_says_no_vector_store() {
     let dir = tempdir().unwrap();
     let in_existing_folder = dir.path().join("store.vectors");
@@ -448,8 +496,11 @@ fn symlink_dir(target: &Path, link: &Path) {
     std::os::windows::fs::symlink_dir(target, link).unwrap();
 }
 
+/// The pool key is the canonical path of the file's folder plus the file's
+/// name, so spellings that differ only in how they reach the folder share one
+/// entry. A symlink to the file itself is a different name, and keys apart.
 #[test]
-fn every_spelling_of_one_file_shares_its_pool_entry() {
+fn spellings_of_one_folder_share_the_file_s_pool_entry() {
     let dir = tempdir().unwrap();
     let real = dir.path().join("real");
     std::fs::create_dir(&real).unwrap();
@@ -459,21 +510,21 @@ fn every_spelling_of_one_file_shares_its_pool_entry() {
     let via_dots = real.join("..").join("real").join("store.vectors");
     closed_store(&path);
 
-    // Two read-only opens under different spellings share one database.
+    // Two read-only opens under different spellings of the folder share one database.
     let reader = VectorStorage::open_read_only(&via_link, 3).unwrap();
     let dotted_reader = VectorStorage::open_read_only(&via_dots, 3).unwrap();
     assert_eq!(dotted_reader.len().unwrap(), 2);
     // A writable open under a third spelling is refused by the pool.
     let message = VectorStorage::new(&path, 3).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
+    assert_in_process_refusal(&message);
     drop(reader);
     drop(dotted_reader);
 
-    // And the reverse: a writer under one spelling refuses a reader under another.
+    // And the reverse: a writer under one folder spelling refuses a reader under another.
     let writer = VectorStorage::new(&via_link, 3).unwrap();
     let message = VectorStorage::open_read_only(&via_dots, 3).err().expect("refused").to_string();
-    assert!(message.contains(LOCK_MESSAGE), "{message}");
-    // Writable opens under different spellings share one database.
+    assert_in_process_refusal(&message);
+    // Writable opens under different folder spellings share one database.
     assert_eq!(VectorStorage::new(&path, 3).unwrap().len().unwrap(), 2);
     drop(writer);
 }

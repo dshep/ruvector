@@ -46,7 +46,7 @@ static DB_POOL: Lazy<Mutex<HashMap<PathBuf, PoolEntry>>> =
 mod read_only_backend;
 
 #[cfg(feature = "storage")]
-use read_only_backend::{lock_held_error, ReadOnlyBackend};
+use read_only_backend::ReadOnlyBackend;
 
 struct PoolEntry {
     db: Arc<Database>,
@@ -72,13 +72,15 @@ impl VectorStorage {
     /// Create or open a vector storage at the given path
     ///
     /// Writable opens of one file in this process share one database through
-    /// a global connection pool, keyed on the file's canonical path.
+    /// a global connection pool, keyed on the canonical path of the file's
+    /// folder plus its name (see `pool_key`).
     ///
     /// An existing file's tables are created only when one is missing, so no
     /// transaction is committed when they all exist; redb still rewrites its
     /// header on open and close, so the modification time changes. A file
     /// this process holds read-only is refused with "Database already open.
-    /// Cannot acquire lock." until those handles drop.
+    /// Cannot acquire lock. (this process holds the file in the other mode)"
+    /// until those handles drop.
     pub fn new<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
         let path_ref = path.as_ref();
 
@@ -115,10 +117,12 @@ impl VectorStorage {
     /// one is refused with "Database already open. Cannot acquire lock." while
     /// a writer holds the file, as a writer is while a reader holds it. In this
     /// process, read-only opens of one file share one database, and a file this
-    /// process holds writable is refused with the same error until those
-    /// handles drop. A file that does not exist, is empty, or lacks one of the
-    /// vector tables is refused with "no vector store at <path>: …"; nothing
-    /// is created.
+    /// process holds writable is refused with the same error followed by " (this
+    /// process holds the file in the other mode)" until those handles drop. A
+    /// file that does not exist, is empty, or lacks the vectors or metadata
+    /// table is refused with "no vector store at <path>: …"; nothing is
+    /// created. A file without the config table opens: it was written before
+    /// that table existed.
     pub fn open_read_only<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
         let path_buf = resolve_path(path.as_ref())?;
         let pool_key = pool_key(&path_buf)?;
@@ -128,7 +132,7 @@ impl VectorStorage {
                 return Err(no_vector_store(&path_buf, "the file is empty"));
             }
             let db = redb::Builder::new().create_with_backend(backend)?;
-            if any_table_missing(&db)? {
+            if vector_tables_missing(&db.begin_read()?)? {
                 return Err(no_vector_store(&path_buf, "the file has no vector tables"));
             }
             Ok(db)
@@ -397,9 +401,11 @@ fn resolve_path(path_ref: &Path) -> Result<PathBuf> {
     Ok(path_buf)
 }
 
-/// The key a storage file is pooled under: the canonical path of its parent
-/// folder joined with the file name, so every spelling of one file (a
-/// symlinked folder, `..` segments) shares one entry. The parent must exist.
+/// The key a storage file is pooled under: the canonical path of its folder
+/// joined with the file name as given, so spellings that differ only in how
+/// they reach the folder (a symlinked folder, `..` segments) share one entry.
+/// A symlink to the file itself has its own name, so it keys apart. The
+/// folder must exist.
 #[cfg(feature = "storage")]
 fn pool_key(path: &Path) -> Result<PathBuf> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
@@ -418,8 +424,9 @@ fn pool_key(path: &Path) -> Result<PathBuf> {
 }
 
 /// The pooled database for `key` in this mode, opened by `open` when the pool
-/// holds none. A database pooled in the other mode refuses the open with the
-/// lock error, before any file is touched.
+/// holds none. A database pooled in the other mode refuses the open with
+/// redb's lock text plus a note that this process is the holder, before any
+/// file is touched.
 #[cfg(feature = "storage")]
 fn pooled(
     key: &Path,
@@ -429,7 +436,7 @@ fn pooled(
     let mut pool = DB_POOL.lock();
     if let Some(existing) = pool.get(key) {
         if existing.read_only != read_only {
-            return Err(lock_held_error());
+            return Err(held_in_other_mode_error());
         }
         return Ok(Arc::clone(&existing.db));
     }
@@ -444,26 +451,41 @@ fn pooled(
     Ok(db)
 }
 
+/// The refusal of an open in one mode while this process holds the file in
+/// the other. It keeps redb's lock text, which callers match, and says the
+/// holder is this process; a refusal by another process's lock has redb's
+/// text alone.
+#[cfg(feature = "storage")]
+fn held_in_other_mode_error() -> RuvectorError {
+    RuvectorError::DatabaseError(format!(
+        "{} (this process holds the file in the other mode)",
+        redb::DatabaseError::DatabaseAlreadyOpen
+    ))
+}
+
 /// The refusal of a read-only open of a file that holds no vector store.
-/// Callers match the stable prefix "no vector store at".
+/// Its message contains the phrase "no vector store at", which callers match.
 #[cfg(feature = "storage")]
 fn no_vector_store(path: &Path, why: &str) -> RuvectorError {
     RuvectorError::StorageError(format!("no vector store at {}: {}", path.display(), why))
 }
 
+/// Whether the vectors or metadata table is missing: a file lacking either
+/// holds no vector store. The config table is not required, because stores
+/// written before it existed have none.
 #[cfg(feature = "storage")]
-fn any_table_missing(db: &Database) -> Result<bool> {
-    let read_txn = db.begin_read()?;
-    Ok(table_missing(&read_txn, VECTORS_TABLE)?
-        || table_missing(&read_txn, METADATA_TABLE)?
-        || table_missing(&read_txn, CONFIG_TABLE)?)
+fn vector_tables_missing(read_txn: &redb::ReadTransaction) -> Result<bool> {
+    Ok(table_missing(read_txn, VECTORS_TABLE)? || table_missing(read_txn, METADATA_TABLE)?)
 }
 
 /// Create the three tables in one commit, only when one is missing, so
 /// opening an existing store commits nothing.
 #[cfg(feature = "storage")]
 fn create_missing_tables(db: &Database) -> Result<()> {
-    if any_table_missing(db)? {
+    let read_txn = db.begin_read()?;
+    let missing = vector_tables_missing(&read_txn)? || table_missing(&read_txn, CONFIG_TABLE)?;
+    drop(read_txn);
+    if missing {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(VECTORS_TABLE)?;
