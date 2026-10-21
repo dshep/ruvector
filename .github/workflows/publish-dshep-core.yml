@@ -1,7 +1,8 @@
 name: Publish @dshep/ruvector-core
 
 # Builds the Node engine for all five platforms, checks on every platform that
-# a closed store's file opens again, and publishes
+# a closed store's file opens again and that a read-only open leaves the file
+# unchanged and is kept apart from writers by the lock, and publishes
 # @dshep/ruvector-core plus its five @dshep/ruvector-core-<platform> packages to
 # GitHub Packages. Builds the engine of the commit it runs on, never the
 # default branch's.
@@ -107,6 +108,10 @@ jobs:
         run: |
           echo "checking with node on $(node -p 'process.platform + "-" + process.arch')"
           node npm/packages/dshep-core/scripts/close-reopen-check.cjs out/ruvector.node
+
+      - name: Check a read-only open writes nothing and shares only with readers
+        shell: bash
+        run: node npm/packages/dshep-core/scripts/read-only-check.cjs out/ruvector.node
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
