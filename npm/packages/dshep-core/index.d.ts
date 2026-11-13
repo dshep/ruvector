@@ -56,6 +56,14 @@ export class VectorDb {
   search(query: SearchQuery): Promise<SearchResult[]>;
   delete(id: string): Promise<boolean>;
   get(id: string): Promise<VectorEntry | null>;
+  /**
+   * Every stored entry, in id order, each as get() returns it: `id` always
+   * set, `vector` a Float32Array, `metadata` the stored JSON text or absent.
+   * Reads one snapshot and writes nothing, so it works on a read-only open.
+   * Metadata the engine cannot parse rejects the call. Every entry is held in
+   * memory at once.
+   */
+  enumerate(): Promise<Array<VectorEntry & { id: string; vector: Float32Array }>>;
   len(): Promise<number>;
   isEmpty(): Promise<boolean>;
   /**
