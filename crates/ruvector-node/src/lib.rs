@@ -553,6 +553,51 @@ impl VectorDB {
         )
     }
 
+    /// Every stored entry, with its id, vector and metadata, in id order
+    ///
+    /// Reads one snapshot and writes nothing, so it works on a read-only
+    /// open. Each entry has the shape `get` returns: `id` always set,
+    /// `vector` a Float32Array, `metadata` the stored JSON text or absent.
+    /// Metadata that cannot be parsed rejects the call. Every entry is held
+    /// in memory at once.
+    ///
+    /// # Example
+    /// ```javascript
+    /// for (const entry of await db.enumerate()) {
+    ///   console.log(entry.id, entry.vector.length, entry.metadata);
+    /// }
+    /// ```
+    #[napi(ts_return_type = "Promise<Array<JsVectorEntry>>")]
+    pub fn enumerate(&self, env: Env) -> Result<JsObject> {
+        self.call(
+            env,
+            move |db| {
+                with_open(db, |db| db.enumerate())
+                    .map_err(|e| Error::from_reason(format!("Enumerate failed: {}", e)))
+            },
+            |entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| {
+                        // Written back as JSON text, as `get` does; a map that cannot
+                        // be written rejects the call rather than losing its metadata.
+                        let metadata = match entry.metadata {
+                            Some(m) => Some(serde_json::to_string(&m).map_err(|e| {
+                                Error::from_reason(format!("Enumerate failed: {}", e))
+                            })?),
+                            None => None,
+                        };
+                        Ok(JsVectorEntry {
+                            id: entry.id,
+                            vector: Float32Array::new(entry.vector),
+                            metadata,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            },
+        )
+    }
+
     /// Get the number of vectors in the database
     ///
     /// # Example

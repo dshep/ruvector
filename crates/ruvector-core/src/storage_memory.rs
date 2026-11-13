@@ -150,6 +150,22 @@ impl MemoryStorage {
         Ok(self.keys())
     }
 
+    /// Every stored entry, with its id, vector and metadata, in id order (for
+    /// API compatibility with VectorStorage).
+    pub fn enumerate(&self) -> Result<Vec<VectorEntry>> {
+        let mut ids = self.keys();
+        ids.sort();
+        let mut entries = Vec::with_capacity(ids.len());
+        for id in ids {
+            // An id deleted since `keys()` read it is left out, as if the
+            // delete had come first.
+            if let Some(entry) = self.get(&id)? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
     /// Clear all data
     pub fn clear(&self) -> Result<()> {
         self.vectors.clear();

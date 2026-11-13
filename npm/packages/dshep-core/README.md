@@ -7,7 +7,8 @@ lock going with the last handle on the file, so a closed store can be opened
 again by this process or another one,
 and a `readOnly` open option that never writes the store's file. Read-only opens
 share the file only with each other: one is refused while a writer holds it, and
-a writer while one holds it (see `index.d.ts`).
+a writer while one holds it, and a `VectorDb.enumerate()` that lists every
+entry with its id, vector and metadata, read-only opens included (see `index.d.ts`).
 
 Versions are the upstream `@ruvector/core` version plus a counter, for example
 `0.1.30-ledgerdb.1`. Each platform's binary is its own package,

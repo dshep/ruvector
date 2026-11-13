@@ -316,6 +316,42 @@ impl VectorStorage {
         Ok(ids)
     }
 
+    /// Every stored entry, with its id, vector and metadata, in id order.
+    ///
+    /// Reads one snapshot in one read transaction, so a write running at the
+    /// same time is either wholly in the list or wholly absent, and writes
+    /// nothing, so it works on a read-only open. Metadata that cannot be
+    /// parsed fails the call, as `get` does, rather than being left out.
+    /// Every entry is held in memory at once.
+    pub fn enumerate(&self) -> Result<Vec<VectorEntry>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(VECTORS_TABLE)?;
+        let meta_table = read_txn.open_table(METADATA_TABLE)?;
+
+        let mut entries = Vec::with_capacity(table.len()? as usize);
+        for item in table.iter()? {
+            let (key, vector_data) = item?;
+            let id = key.value();
+            let (vector, _): (Vec<f32>, usize) =
+                bincode::decode_from_slice(vector_data.value(), config::standard())
+                    .map_err(|e| RuvectorError::SerializationError(e.to_string()))?;
+            let metadata = match meta_table.get(id)? {
+                Some(meta_data) => Some(
+                    serde_json::from_str(meta_data.value())
+                        .map_err(|e| RuvectorError::SerializationError(e.to_string()))?,
+                ),
+                None => None,
+            };
+            entries.push(VectorEntry {
+                id: Some(id.to_string()),
+                vector,
+                metadata,
+            });
+        }
+
+        Ok(entries)
+    }
+
     /// Save database configuration to persistent storage
     pub fn save_config(&self, options: &DbOptions) -> Result<()> {
         self.refuse_if_read_only()?;

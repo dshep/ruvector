@@ -254,6 +254,13 @@ impl VectorDB {
     pub fn keys(&self) -> Result<Vec<String>> {
         self.storage.all_ids()
     }
+
+    /// Every stored entry, with its id, vector and metadata, in id order.
+    /// Reads storage only and writes nothing, so it works on a read-only
+    /// open: see [`VectorStorage::enumerate`].
+    pub fn enumerate(&self) -> Result<Vec<VectorEntry>> {
+        self.storage.enumerate()
+    }
 }
 
 #[cfg(test)]
