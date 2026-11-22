@@ -1,0 +1,115 @@
+name: Mirror @dshep/ruvector-core to npmjs
+
+# Copies one published @dshep/ruvector-core version, with its five
+# @dshep/ruvector-core-<platform> packages, from GitHub Packages to the public
+# npm registry, so a host with no @dshep registry line and no token installs
+# the engine. Each package is the GitHub Packages tarball with only its
+# publishConfig pointed at npmjs: the engine binaries are byte for byte the
+# published ones. Platform packages go first, then the main package, so the
+# main package never names a platform package npmjs does not have yet.
+#
+# It runs after every successful tag publish of "Publish @dshep/ruvector-core",
+# or by hand for a version already on GitHub Packages.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'A published version, e.g. 0.1.30-ledgerdb.2'
+        required: true
+  workflow_run:
+    workflows: ['Publish @dshep/ruvector-core']
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  mirror:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'dshep-core-v'))
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20'
+
+      - name: Copy the packages to npmjs
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # npm expands ${...} in an .npmrc itself, so neither token is written
+        # out. A package already on npmjs at this version is skipped, so a run
+        # that failed part-way can be re-run. A lookup that fails for any reason
+        # other than "not found" stops the job.
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-${RUN_TAG#dshep-core-v}}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ledgerdb\.[0-9]+$ ]]; then
+            echo "not a ledgerdb engine version: '$VERSION'"; exit 1
+          fi
+          W="$RUNNER_TEMP/mirror"
+          mkdir -p "$W"
+          printf '%s\n' '@dshep:registry=https://npm.pkg.github.com' '//npm.pkg.github.com/:_authToken=${GH_PACKAGES_TOKEN}' > "$W/from.npmrc"
+          printf '%s\n' '@dshep:registry=https://registry.npmjs.org' '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "$W/to.npmrc"
+
+          MAIN='@dshep/ruvector-core'
+          npm view "$MAIN@$VERSION" optionalDependencies --json --userconfig "$W/from.npmrc" > "$W/platforms.json"
+          mapfile -t PLATFORMS < <(node -e '
+            const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            const want = process.argv[2];
+            const names = Object.keys(d).sort();
+            if (names.length !== 5) { console.error(`expected 5 platform packages, got ${names.length}`); process.exit(1); }
+            for (const n of names) {
+              if (!n.startsWith("@dshep/ruvector-core-") || d[n] !== want) { console.error(`unexpected platform entry ${n}@${d[n]}`); process.exit(1); }
+              console.log(n);
+            }' "$W/platforms.json" "$VERSION")
+
+          mirror() {
+            local name="$1" dir found rc
+            if npm view "$name@$VERSION" version --userconfig "$W/to.npmrc" >"$W/view.out" 2>"$W/view.err"; then rc=0; else rc=$?; fi
+            found="$(cat "$W/view.out")"
+            if [ "$rc" -eq 0 ] && [ "$found" = "$VERSION" ]; then
+              echo "skip $name@$VERSION: already on npmjs"; return 0
+            elif [ "$rc" -eq 0 ] && [ -z "$found" ]; then
+              echo "$name is on npmjs without $VERSION: publishing"
+            elif [ "$rc" -ne 0 ] && grep -q 'E404' "$W/view.err"; then
+              echo "$name is not on npmjs: publishing"
+            else
+              echo "cannot tell whether $name@$VERSION is on npmjs (npm view exit $rc):"
+              cat "$W/view.out" "$W/view.err"; return 1
+            fi
+            dir="$(mktemp -d "$W/pkg.XXXXXX")"
+            (cd "$dir" && npm pack "$name@$VERSION" --userconfig "$W/from.npmrc" --silent > tarball.txt)
+            tar -xzf "$dir/$(cat "$dir/tarball.txt")" -C "$dir"
+            node -e '
+              const f = process.argv[1], fs = require("fs");
+              const p = JSON.parse(fs.readFileSync(f, "utf8"));
+              p.publishConfig = { registry: "https://registry.npmjs.org", access: "public" };
+              fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");' "$dir/package/package.json"
+            npm publish "$dir/package" --access public --tag latest --userconfig "$W/to.npmrc"
+          }
+
+          for name in "${PLATFORMS[@]}"; do mirror "$name"; done
+          mirror "$MAIN"
+
+      - name: Check an anonymous host sees the version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-${RUN_TAG#dshep-core-v}}"
+          EMPTY="$RUNNER_TEMP/empty.npmrc"; : > "$EMPTY"
+          got="$(npm view "@dshep/ruvector-core@$VERSION" version --registry https://registry.npmjs.org --userconfig "$EMPTY")"
+          test "$got" = "$VERSION" || { echo "npmjs answered '$got' for $VERSION"; exit 1; }
+          echo "npmjs serves @dshep/ruvector-core@$VERSION to a host with no token"
